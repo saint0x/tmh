@@ -414,6 +414,33 @@ Paper framing:
 - it should not be used to claim that `16.667%` is universal across arbitrary model layer splits
 - the correct phrasing is that Qwen-30B served-model pressure and adversarial geometry both preserve the `16.667%` Qwen-shape old/warm reduction, while the broader invariant is safe explicit hierarchy management
 
+## Model-Family Memory Baseline Evidence
+
+The current paper package now includes a cross-model production memory-pressure baseline:
+
+- `artifacts/tmh_model_family_memory_baseline/model-family-v1/REPORT.md`
+- `artifacts/fozzy/tmh_model_family_memory_baseline.trace.fozzy`
+
+Baseline scope:
+
+- `15` locally cached production model configs
+- `31` pressure cases
+- `18,600` model/page/budget/pressure rows
+- `14,145` old-KV rows
+- `100%` plan validation
+- `100%` invariant pass rate
+
+Result:
+
+- conservative old/warm KV pressure floor: `16.071%`
+- promoted production claim: `at least 16.0% old/warm KV memory-pressure reduction across the tested production model-family baseline`
+
+Paper framing:
+
+- use `16.0%+` as the production-wide memory-pressure claim
+- keep `16.667%` as a Qwen-30B-specific result
+- explain that total effective KV pressure reduction depends on the preserved hot raw window, prompt-anchor pages, page rounding, and whether a request has old KV to demote
+
 ## Reviewer-Critical Points
 
 These are the questions the draft must answer cleanly.

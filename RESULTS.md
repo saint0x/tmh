@@ -605,3 +605,46 @@ Interpretation:
 - the thesis holds as a page-native memory-hierarchy claim, not as a claim that one numeric reduction is universal
 - the `16.667%` warm old-KV reduction should be stated as the Qwen-30B production-shape result
 - arbitrary layer splits produce different old/warm reductions; the one-layer all-late boundary intentionally has `0%` reduction versus uniform-int8 old KV while preserving no-drop/no-cold behavior
+
+## Model-Family Memory Baseline
+
+Status: `passed`
+
+Artifact:
+
+- `artifacts/tmh_model_family_memory_baseline/model-family-v1/REPORT.md`
+- `artifacts/fozzy/tmh_model_family_memory_baseline.trace.fozzy`
+
+Scope:
+
+- model configs: `15`
+- pressure cases: `31`
+- rows: `18,600`
+- old-KV rows: `14,145`
+- page sizes: `8`, `16`, `32`, `64`, `128`
+- budgets: `75`, `50`, `25`, `12.5`, `6.25`, `3.125`, `1`, `0`
+
+Validation:
+
+- direct validator: pass
+- `fozzy validate`: pass
+- `fozzy run --det --strict --proc-backend host --record`: pass
+- `fozzy test --det --strict --proc-backend host`: pass
+- `fozzy doctor --deep --runs 5`: pass with five identical signatures
+- `fozzy trace verify`: pass
+- `fozzy replay`: pass
+- `fozzy ci`: pass
+
+Readout:
+
+- plan validation pass rate: `100%`
+- invariant pass rate: `100%`
+- conservative old/warm KV pressure floor across tested model configs: `16.071%`
+- promoted public number: `at least 16.0% old/warm KV memory-pressure reduction across the tested production model-family baseline`
+
+Interpretation:
+
+- this replaces the Qwen-30B-only `16.667%` number as the production-wide memory-pressure claim
+- Qwen-30B still supports `16.667%` for that model shape
+- the cross-model floor is set by Qwen2.5 models with `28` layers and `late_layer_start=18`
+- total effective KV pressure reduction remains workload-dependent because hot raw KV and prompt-anchor pages are intentionally preserved

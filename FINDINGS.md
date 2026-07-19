@@ -601,6 +601,42 @@ Takeaway:
 - the paper should avoid overselling `16.667%` as a universal constant
 - `16.667%` is the production Qwen-30B result; the general contribution is the compiled memory hierarchy and its invariant-preserving pressure behavior
 
+### 29. The production memory-pressure claim is now a cross-model floor
+
+The model-family baseline now exists at:
+
+- `artifacts/tmh_model_family_memory_baseline/model-family-v1/REPORT.md`
+- `artifacts/fozzy/tmh_model_family_memory_baseline.trace.fozzy`
+
+Scope:
+
+- `15` actual cached Hugging Face model configs
+- `31` pressure cases
+- `18,600` total rows
+- `14,145` rows with old KV present
+- page sizes `8`, `16`, `32`, `64`, `128`
+- hot budgets `75`, `50`, `25`, `12.5`, `6.25`, `3.125`, `1`, `0`
+
+Observed shape:
+
+- plan validation: `100%`
+- invariant validation: `100%`
+- conservative supported-model old/warm KV pressure floor: `16.071%`
+- promoted public number: `at least 16.0% old/warm KV memory-pressure reduction across the tested production model-family baseline`
+
+Important boundary:
+
+- the earlier `16.667%` value remains true for Qwen-30B and other shapes with the same effective early-layer fraction
+- it should no longer be promoted as the production-wide number
+- the production-wide number should be the cross-model floor
+- total effective KV pressure remains request/budget dependent because hot raw KV and prompt-anchor pages are preserved by design
+
+Takeaway:
+
+- we now have a baseline number that is conservative enough to stand behind across the actual tested model family
+- use `16.0%+` for production memory-pressure language
+- keep `16.667%` as the Qwen-30B-specific result in detailed benchmark tables
+
 ## Proposed Comparison Matrix
 
 The next TMH plan study should compare:

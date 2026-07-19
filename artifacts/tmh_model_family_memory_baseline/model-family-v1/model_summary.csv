@@ -1,0 +1,16 @@
+model_id,model_type,layer_count,kv_heads,head_dim,late_layer_start,row_count,old_kv_row_count,pass_rate_pct,min_warm_reduction_vs_uniform_int8_pct,mean_warm_reduction_vs_uniform_int8_pct,min_total_reduction_vs_same_hot_uniform_int8_pct,min_compression_vs_raw_pct
+JunHowie/Qwen3-32B-GPTQ-Int4,qwen3,64,8,128,42,1240,943,100.0,16.406,16.406,0.497,0.0
+Qwen/Qwen2.5-0.5B-Instruct,qwen2,24,2,64,16,1240,943,100.0,16.667,16.667,0.505,0.0
+Qwen/Qwen2.5-1.5B-Instruct,qwen2,28,2,128,18,1240,943,100.0,16.071,16.071,0.487,0.0
+Qwen/Qwen2.5-32B-Instruct-AWQ,qwen2,64,8,128,42,1240,943,100.0,16.406,16.406,0.497,0.0
+Qwen/Qwen2.5-32B-Instruct-GPTQ-Int4,qwen2,64,8,128,42,1240,943,100.0,16.406,16.406,0.497,0.0
+Qwen/Qwen2.5-3B-Instruct,qwen2,36,2,128,24,1240,943,100.0,16.667,16.667,0.505,0.0
+Qwen/Qwen2.5-7B-Instruct,qwen2,28,4,128,18,1240,943,100.0,16.071,16.071,0.487,0.0
+Qwen/Qwen3-14B,qwen3,40,8,128,26,1240,943,100.0,16.25,16.25,0.492,0.0
+Qwen/Qwen3-30B-A3B-GPTQ-Int4,qwen3_moe,48,4,128,32,1240,943,100.0,16.667,16.667,0.505,0.0
+Qwen/Qwen3-32B,qwen3,64,8,128,42,1240,943,100.0,16.406,16.406,0.497,0.0
+Qwen/Qwen3-4B,qwen3,36,8,128,24,1240,943,100.0,16.667,16.667,0.505,0.0
+Qwen/Qwen3-4B-Instruct-2507,qwen3,36,8,128,24,1240,943,100.0,16.667,16.667,0.505,0.0
+Qwen/Qwen3-8B,qwen3,36,8,128,24,1240,943,100.0,16.667,16.667,0.505,0.0
+kaitchup/Qwen3-32B-autoround-2bit-gptq,qwen3,64,8,128,42,1240,943,100.0,16.406,16.406,0.497,0.0
+kaitchup/Qwen3-32B-autoround-4bit-gptq,qwen3,64,8,128,42,1240,943,100.0,16.406,16.406,0.497,0.0

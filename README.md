@@ -71,6 +71,18 @@ The adversarial layout stress suite expands the geometry beyond the served 30B c
 
 The hierarchy thesis held across that matrix: no cold or dropped KV, no negative total-reduction rows where old KV exists, prompt anchors stayed pinned raw, recent tails stayed raw/hot, and old pages demoted rather than evicting. The exact `16.667%` old/warm reduction remains correctly scoped to the Qwen-30B production shape.
 
+The model-family memory baseline now measures the same production TMH planner across every locally cached Hugging Face model config:
+
+- `15` model configs
+- `31` endpoint-derived plus synthetic pressure cases
+- `18,600` model/page/budget/pressure rows
+- `14,145` rows with old KV present
+- `100%` plan validation and `100%` invariant pass rate
+- conservative supported-model old/warm KV pressure floor: `16.071%`
+- promoted public number: `at least 16.0% old/warm KV memory-pressure reduction across the tested production model-family baseline`
+
+This replaces the Qwen-30B-only `16.667%` number as the production-wide claim. The Qwen-30B number remains true for that model shape, but the model-family floor is the number to promote.
+
 ## Quickstart
 
 Run the deterministic TMH smoke scenario:
@@ -101,8 +113,10 @@ For harness-specific commands and artifact shapes, see `standalone_harness/READM
 - `artifacts/tmh_30b_standard_runs3_layout_sweep/20260719-041243/REPORT.md`: strongest endpoint-derived TMH layout sweep.
 - `artifacts/tmh_30b_maxfit_preflight_layout_sweep/20260719-040423/REPORT.md`: max-fit dry-run preflight sweep.
 - `artifacts/tmh_adversarial_layout_stress/robust-stress-v1/REPORT.md`: adversarial geometry/model-shape stress report.
+- `artifacts/tmh_model_family_memory_baseline/model-family-v1/REPORT.md`: cross-model production memory-pressure baseline.
 - `artifacts/fozzy/tmh_30b_standard_runs3_layout_sweep.trace.fozzy`: deterministic trace for the strongest layout sweep.
 - `artifacts/fozzy/tmh_adversarial_layout_stress.trace.fozzy`: deterministic host-backed trace for the adversarial stress validator.
+- `artifacts/fozzy/tmh_model_family_memory_baseline.trace.fozzy`: deterministic host-backed trace for the model-family baseline validator.
 
 ## Design Principles
 

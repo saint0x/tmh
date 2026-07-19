@@ -231,3 +231,63 @@ Boundary:
 - the TMH hierarchy contract held across the adversarial matrix
 - the exact `16.667%` warm old-KV reduction is Qwen-30B-shape specific
 - arbitrary layer splits produce different warm-reduction percentages, and the one-layer all-late boundary shape intentionally has `0%` reduction versus uniform-int8 old KV
+
+## TMH Model-Family Memory Baseline
+
+The model-family baseline runs the production TMH planner against every locally cached Hugging Face config. This is the baseline to use for production memory-pressure language because it promotes the cross-model floor rather than a single-model value.
+
+```bash
+cd /home/deepsaint/work/kv-tiered/tmh
+standalone_harness/tmh_model_family_memory_baseline.py --run-id model-family-v1
+standalone_harness/validate_tmh_model_family_memory_baseline.py \
+  artifacts/tmh_model_family_memory_baseline/model-family-v1
+```
+
+Current artifact:
+
+- `artifacts/tmh_model_family_memory_baseline/model-family-v1/REPORT.md`
+- `artifacts/fozzy/tmh_model_family_memory_baseline.trace.fozzy`
+
+Current validation:
+
+```bash
+cd /home/deepsaint/work/kv-tiered/tmh
+/home/deepsaint/.local/bin/fozzy validate \
+  standalone_harness/tmh_model_family_memory_baseline.fozzy.json \
+  --json
+/home/deepsaint/.local/bin/fozzy --json run \
+  standalone_harness/tmh_model_family_memory_baseline.fozzy.json \
+  --det \
+  --strict \
+  --seed 20260719 \
+  --proc-backend host \
+  --record artifacts/fozzy/tmh_model_family_memory_baseline.trace.fozzy \
+  --record-collision overwrite
+/home/deepsaint/.local/bin/fozzy trace verify \
+  artifacts/fozzy/tmh_model_family_memory_baseline.trace.fozzy \
+  --strict \
+  --json
+/home/deepsaint/.local/bin/fozzy replay \
+  artifacts/fozzy/tmh_model_family_memory_baseline.trace.fozzy \
+  --json
+/home/deepsaint/.local/bin/fozzy ci \
+  artifacts/fozzy/tmh_model_family_memory_baseline.trace.fozzy \
+  --json
+```
+
+Baseline result:
+
+- `15` actual cached model configs
+- `31` pressure cases
+- `18,600` total rows
+- `14,145` old-KV rows
+- `100%` plan validation
+- `100%` invariant pass rate
+- conservative old/warm KV reduction floor: `16.071%`
+- production claim number: `at least 16.0% old/warm KV memory-pressure reduction across the tested production model-family baseline`
+
+Boundary:
+
+- the Qwen-30B production shape still has `16.667%` old/warm KV reduction
+- the production-wide number should be the cross-model floor, not the Qwen-30B-only value
+- total effective KV pressure reduction remains workload-dependent because hot raw KV and prompt-anchor pages are intentionally preserved

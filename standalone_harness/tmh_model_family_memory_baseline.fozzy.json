@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "name": "tmh-model-family-memory-baseline",
+  "steps": [
+    {
+      "type": "proc_when",
+      "cmd": "/usr/bin/python3",
+      "args": [
+        "/home/deepsaint/work/kv-tiered/tmh/standalone_harness/validate_tmh_model_family_memory_baseline.py",
+        "artifacts/tmh_model_family_memory_baseline/model-family-v1"
+      ],
+      "exit_code": 0,
+      "stdout": "tmh-model-family-baseline-ok\n",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "/usr/bin/python3",
+      "args": [
+        "/home/deepsaint/work/kv-tiered/tmh/standalone_harness/validate_tmh_model_family_memory_baseline.py",
+        "artifacts/tmh_model_family_memory_baseline/model-family-v1"
+      ],
+      "expect_exit": 0,
+      "expect_stdout": "tmh-model-family-baseline-ok\n"
+    }
+  ]
+}

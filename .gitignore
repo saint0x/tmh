@@ -25,6 +25,7 @@ artifacts/fozzy/*
 !artifacts/fozzy/tmh_30b_maxfit_preflight_layout_sweep.trace.fozzy
 !artifacts/fozzy/tmh_30b_standard_runs3_layout_sweep.trace.fozzy
 !artifacts/fozzy/tmh_adversarial_layout_stress.trace.fozzy
+!artifacts/fozzy/tmh_model_family_memory_baseline.trace.fozzy
 
 !artifacts/sock_endpoint_pressure/
 artifacts/sock_endpoint_pressure/*
@@ -101,3 +102,13 @@ artifacts/tmh_adversarial_layout_stress/robust-stress-v1/*
 !artifacts/tmh_adversarial_layout_stress/robust-stress-v1/result.json
 !artifacts/tmh_adversarial_layout_stress/robust-stress-v1/rows.csv
 !artifacts/tmh_adversarial_layout_stress/robust-stress-v1/summary.csv
+
+!artifacts/tmh_model_family_memory_baseline/
+artifacts/tmh_model_family_memory_baseline/*
+!artifacts/tmh_model_family_memory_baseline/model-family-v1/
+artifacts/tmh_model_family_memory_baseline/model-family-v1/*
+!artifacts/tmh_model_family_memory_baseline/model-family-v1/REPORT.md
+!artifacts/tmh_model_family_memory_baseline/model-family-v1/result.json
+!artifacts/tmh_model_family_memory_baseline/model-family-v1/rows.csv
+!artifacts/tmh_model_family_memory_baseline/model-family-v1/model_summary.csv
+!artifacts/tmh_model_family_memory_baseline/model-family-v1/budget_summary.csv
