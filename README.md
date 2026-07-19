@@ -59,6 +59,18 @@ The old/warm KV pressure reduction versus same-hot uniform-int8 old KV held at `
 
 This supports the TMH thesis under real served-model pressure, while keeping the boundary honest: the current 30B evidence proves compiled layout-pressure accounting against live sock/vendored-vLLM traffic. The next milestone is wiring TMH-managed KV internals into the live runtime and rerunning the same endpoint pressure suite.
 
+The adversarial layout stress suite expands the geometry beyond the served 30B corpus:
+
+- `16,632` synthetic shape/page/budget/sequence rows
+- `9,255` rows with old KV present
+- page sizes from `1` to `512`
+- hot budgets from `100` down to `0`
+- five model shapes, including Qwen-30B GQA, dense/GQA boundaries, fp32 MHA, a 70B-style shape, and a one-layer all-late boundary shape
+- `356,890,836` checked layer-pages
+- `100%` plan validation and `100%` invariant pass rate
+
+The hierarchy thesis held across that matrix: no cold or dropped KV, no negative total-reduction rows where old KV exists, prompt anchors stayed pinned raw, recent tails stayed raw/hot, and old pages demoted rather than evicting. The exact `16.667%` old/warm reduction remains correctly scoped to the Qwen-30B production shape.
+
 ## Quickstart
 
 Run the deterministic TMH smoke scenario:
@@ -88,7 +100,9 @@ For harness-specific commands and artifact shapes, see `standalone_harness/READM
 - `artifacts/sock_endpoint_pressure/20260719-040954/REPORT.md`: strongest live sock endpoint pressure report.
 - `artifacts/tmh_30b_standard_runs3_layout_sweep/20260719-041243/REPORT.md`: strongest endpoint-derived TMH layout sweep.
 - `artifacts/tmh_30b_maxfit_preflight_layout_sweep/20260719-040423/REPORT.md`: max-fit dry-run preflight sweep.
+- `artifacts/tmh_adversarial_layout_stress/robust-stress-v1/REPORT.md`: adversarial geometry/model-shape stress report.
 - `artifacts/fozzy/tmh_30b_standard_runs3_layout_sweep.trace.fozzy`: deterministic trace for the strongest layout sweep.
+- `artifacts/fozzy/tmh_adversarial_layout_stress.trace.fozzy`: deterministic host-backed trace for the adversarial stress validator.
 
 ## Design Principles
 
@@ -101,4 +115,3 @@ For harness-specific commands and artifact shapes, see `standalone_harness/READM
 ## Current Limitation
 
 TMH is validated as a standalone layout and pressure-accounting layer against live 30B endpoint traffic. It is not yet the active KV manager inside the live sock/vendored-vLLM runtime. The next production milestone is direct runtime integration followed by the same 30B pressure suite, plus quality/performance deltas against the current sock baseline.
-

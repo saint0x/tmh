@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "name": "tmh-adversarial-layout-stress",
+  "steps": [
+    {
+      "type": "proc_when",
+      "cmd": "/usr/bin/python3",
+      "args": [
+        "/home/deepsaint/work/kv-tiered/tmh/standalone_harness/validate_tmh_adversarial_layout_stress.py",
+        "artifacts/tmh_adversarial_layout_stress/robust-stress-v1"
+      ],
+      "exit_code": 0,
+      "stdout": "tmh-adversarial-stress-ok\n",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "/usr/bin/python3",
+      "args": [
+        "/home/deepsaint/work/kv-tiered/tmh/standalone_harness/validate_tmh_adversarial_layout_stress.py",
+        "artifacts/tmh_adversarial_layout_stress/robust-stress-v1"
+      ],
+      "expect_exit": 0,
+      "expect_stdout": "tmh-adversarial-stress-ok\n"
+    }
+  ]
+}

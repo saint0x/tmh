@@ -24,6 +24,7 @@ artifacts/fozzy/*
 !artifacts/fozzy/tmh_30b_layout_sweep.trace.fozzy
 !artifacts/fozzy/tmh_30b_maxfit_preflight_layout_sweep.trace.fozzy
 !artifacts/fozzy/tmh_30b_standard_runs3_layout_sweep.trace.fozzy
+!artifacts/fozzy/tmh_adversarial_layout_stress.trace.fozzy
 
 !artifacts/sock_endpoint_pressure/
 artifacts/sock_endpoint_pressure/*
@@ -91,3 +92,12 @@ artifacts/tmh_30b_standard_runs3_layout_sweep/20260719-041243/*
 !artifacts/tmh_30b_standard_runs3_layout_sweep/20260719-041243/result.json
 !artifacts/tmh_30b_standard_runs3_layout_sweep/20260719-041243/rows.csv
 !artifacts/tmh_30b_standard_runs3_layout_sweep/20260719-041243/sweep_summary.csv
+
+!artifacts/tmh_adversarial_layout_stress/
+artifacts/tmh_adversarial_layout_stress/*
+!artifacts/tmh_adversarial_layout_stress/robust-stress-v1/
+artifacts/tmh_adversarial_layout_stress/robust-stress-v1/*
+!artifacts/tmh_adversarial_layout_stress/robust-stress-v1/REPORT.md
+!artifacts/tmh_adversarial_layout_stress/robust-stress-v1/result.json
+!artifacts/tmh_adversarial_layout_stress/robust-stress-v1/rows.csv
+!artifacts/tmh_adversarial_layout_stress/robust-stress-v1/summary.csv

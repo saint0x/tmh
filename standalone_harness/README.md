@@ -171,3 +171,63 @@ Paper-facing read:
 - The `16.667%` old/warm KV pressure reduction is stable across the standard measured 30B corpus and the maxfit near-context preflight corpus.
 - Total effective KV pressure depends on the hot raw window; this is expected and should be reported separately from warm old-KV pressure.
 - These standalone harnesses prove compiled layout accounting against real sock endpoint traffic. They do not yet prove live vLLM execution with TMH-managed KV internals.
+
+## TMH Adversarial Layout Stress
+
+The adversarial stress harness attacks the TMH memory-plan contract with synthetic model shapes and sequence geometry rather than another endpoint replay.
+
+```bash
+cd /home/deepsaint/work/kv-tiered/tmh
+standalone_harness/tmh_adversarial_layout_stress.py --run-id robust-stress-v1
+standalone_harness/validate_tmh_adversarial_layout_stress.py \
+  artifacts/tmh_adversarial_layout_stress/robust-stress-v1
+```
+
+Current artifact:
+
+- `artifacts/tmh_adversarial_layout_stress/robust-stress-v1/REPORT.md`
+- `artifacts/fozzy/tmh_adversarial_layout_stress.trace.fozzy`
+
+Current validation:
+
+```bash
+cd /home/deepsaint/work/kv-tiered/tmh
+/home/deepsaint/.local/bin/fozzy validate \
+  standalone_harness/tmh_adversarial_layout_stress.fozzy.json \
+  --json
+/home/deepsaint/.local/bin/fozzy --json run \
+  standalone_harness/tmh_adversarial_layout_stress.fozzy.json \
+  --det \
+  --strict \
+  --seed 20260719 \
+  --proc-backend host \
+  --record artifacts/fozzy/tmh_adversarial_layout_stress.trace.fozzy \
+  --record-collision overwrite
+/home/deepsaint/.local/bin/fozzy trace verify \
+  artifacts/fozzy/tmh_adversarial_layout_stress.trace.fozzy \
+  --strict \
+  --json
+/home/deepsaint/.local/bin/fozzy replay \
+  artifacts/fozzy/tmh_adversarial_layout_stress.trace.fozzy \
+  --json
+/home/deepsaint/.local/bin/fozzy ci \
+  artifacts/fozzy/tmh_adversarial_layout_stress.trace.fozzy \
+  --json
+```
+
+Stress result:
+
+- `16,632` total rows
+- `9,255` old-KV rows
+- `356,890,836` checked layer-pages
+- `100%` plan validation
+- `100%` invariant pass rate
+- `0` cold/dropped KV violations
+- `0` negative total-reduction rows with old KV
+- Qwen-30B old/warm reduction remains `16.667%`
+
+Boundary:
+
+- the TMH hierarchy contract held across the adversarial matrix
+- the exact `16.667%` warm old-KV reduction is Qwen-30B-shape specific
+- arbitrary layer splits produce different warm-reduction percentages, and the one-layer all-late boundary shape intentionally has `0%` reduction versus uniform-int8 old KV

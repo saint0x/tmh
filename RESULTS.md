@@ -561,3 +561,47 @@ Interpretation:
 - the first selective planner now matches heuristic FPA at moderate budgets and beats it at the tightest budgets
 - the edge remains narrow and interpretable rather than diffuse
 - that is exactly the kind of result worth freezing for paper-facing claims
+
+## Adversarial Layout Stress
+
+Status: `passed`
+
+Artifact:
+
+- `artifacts/tmh_adversarial_layout_stress/robust-stress-v1/REPORT.md`
+- `artifacts/fozzy/tmh_adversarial_layout_stress.trace.fozzy`
+
+Scope:
+
+- synthetic rows: `16,632`
+- old-KV rows: `9,255`
+- checked layer-pages: `356,890,836`
+- page sizes: `1`, `2`, `3`, `4`, `7`, `8`, `16`, `31`, `32`, `64`, `127`, `128`, `256`, `512`
+- budgets: `100`, `99`, `90`, `75`, `50`, `33.333`, `25`, `12.5`, `6.25`, `3.125`, `1`, `0`
+- shapes: Qwen-30B GQA, dense-7B-style GQA, large-70B-style GQA, fp32 MHA, and a one-layer all-late boundary shape
+
+Validation:
+
+- direct validator: pass
+- `fozzy validate`: pass
+- `fozzy run --det --strict --proc-backend host --record`: pass
+- `fozzy test --det --strict --proc-backend host`: pass
+- `fozzy doctor --deep --runs 5`: pass with five identical signatures
+- `fozzy trace verify`: pass
+- `fozzy replay`: pass
+- `fozzy ci`: pass
+
+Readout:
+
+- plan validation pass rate: `100%`
+- invariant pass rate: `100%`
+- cold/dropped KV violations: `0`
+- negative total-reduction rows with old KV: `0`
+- Qwen-30B old/warm KV reduction: `16.667%`
+
+Interpretation:
+
+- the TMH hierarchy contract survived extreme geometry and model-shape variation
+- the thesis holds as a page-native memory-hierarchy claim, not as a claim that one numeric reduction is universal
+- the `16.667%` warm old-KV reduction should be stated as the Qwen-30B production-shape result
+- arbitrary layer splits produce different old/warm reductions; the one-layer all-late boundary intentionally has `0%` reduction versus uniform-int8 old KV while preserving no-drop/no-cold behavior

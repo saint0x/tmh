@@ -384,6 +384,36 @@ Paper-relevant lesson:
 - the gain remains concentrated in the same numeric-head recovery rather than turning into unexplained drift
 - this is exactly the form of planner evidence we want for the draft: modest, repeatable, and interpretable
 
+## Adversarial Layout Stress Evidence
+
+The current paper package now includes an adversarial layout stress run:
+
+- `artifacts/tmh_adversarial_layout_stress/robust-stress-v1/REPORT.md`
+- `artifacts/fozzy/tmh_adversarial_layout_stress.trace.fozzy`
+
+Stress scope:
+
+- `16,632` synthetic rows
+- `9,255` old-KV rows
+- `356,890,836` checked layer-pages
+- page sizes `1` through `512`
+- hot budgets `100` through `0`
+- five model-shape families, including the Qwen-30B production shape and an intentionally hostile one-layer all-late boundary
+
+Result:
+
+- `100%` plan validation
+- `100%` invariant pass rate
+- `0` cold/dropped KV violations
+- `0` negative total-reduction rows where old KV exists
+- Qwen-30B old/warm KV reduction remains `16.667%`
+
+Paper framing:
+
+- this strengthens the TMH claim as a memory-hierarchy abstraction
+- it should not be used to claim that `16.667%` is universal across arbitrary model layer splits
+- the correct phrasing is that Qwen-30B served-model pressure and adversarial geometry both preserve the `16.667%` Qwen-shape old/warm reduction, while the broader invariant is safe explicit hierarchy management
+
 ## Reviewer-Critical Points
 
 These are the questions the draft must answer cleanly.

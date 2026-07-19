@@ -563,6 +563,44 @@ Takeaway:
 - the gain remains narrow, interpretable, and concentrated in numeric-head recovery at the tightest budgets
 - the frozen benchmark artifact for `v3` is now the completed `60`-sample control, not the earlier interrupted partial
 
+### 28. The adversarial layout stress held the hierarchy thesis but scoped the numeric claim
+
+The standalone adversarial stress harness now exists at:
+
+- `artifacts/tmh_adversarial_layout_stress/robust-stress-v1/REPORT.md`
+- `artifacts/fozzy/tmh_adversarial_layout_stress.trace.fozzy`
+
+Scope:
+
+- `16,632` shape/page/budget/sequence rows
+- `9,255` rows with old KV present
+- `356,890,836` checked layer-pages
+- page sizes from `1` through `512`
+- hot budgets from `100` down to `0`
+- five model shapes, including Qwen-30B GQA, dense/GQA boundaries, fp32 MHA, large-70B-style GQA, and a one-layer all-late boundary
+
+Observed shape:
+
+- plan validation: `100%`
+- invariant validation: `100%`
+- cold or dropped KV violations: `0`
+- negative total-reduction rows with old KV: `0`
+- Qwen-30B old/warm KV reduction: `16.667%`
+
+Important boundary:
+
+- the hierarchy thesis held under the adversarial matrix
+- the exact `16.667%` warm old-KV reduction is not universal
+- it is the Qwen-30B production-shape value induced by the current late-layer split
+- other layer splits produce other old/warm reduction percentages
+- the one-layer all-late boundary has `0%` reduction versus uniform-int8 old KV by construction, but still preserves the no-drop/no-cold TMH contract
+
+Takeaway:
+
+- the robust claim is stronger and cleaner now: TMH is a safe explicit hierarchy contract under extreme layout geometry
+- the paper should avoid overselling `16.667%` as a universal constant
+- `16.667%` is the production Qwen-30B result; the general contribution is the compiled memory hierarchy and its invariant-preserving pressure behavior
+
 ## Proposed Comparison Matrix
 
 The next TMH plan study should compare:
