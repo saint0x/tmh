@@ -291,3 +291,66 @@ Boundary:
 - the Qwen-30B production shape still has `16.667%` old/warm KV reduction
 - the production-wide number should be the cross-model floor, not the Qwen-30B-only value
 - total effective KV pressure reduction remains workload-dependent because hot raw KV and prompt-anchor pages are intentionally preserved
+
+## TMH Paper Claim Stress
+
+The paper-claim stress harness is the larger pre-paper confidence pass. It evaluates many deterministic pressure variants over the full local model-config set and keeps only aggregate artifacts so the repo remains usable.
+
+```bash
+cd /home/deepsaint/work/kv-tiered/tmh
+standalone_harness/tmh_paper_claim_stress.py \
+  --run-id paper-claim-stress-v1 \
+  --run-count 40 \
+  --exhaustive-layer-page-limit 0
+standalone_harness/validate_tmh_paper_claim_stress.py \
+  artifacts/tmh_paper_claim_stress/paper-claim-stress-v1
+```
+
+Current artifact:
+
+- `artifacts/tmh_paper_claim_stress/paper-claim-stress-v1/REPORT.md`
+- `artifacts/fozzy/tmh_paper_claim_stress.trace.fozzy`
+
+Current validation:
+
+```bash
+cd /home/deepsaint/work/kv-tiered/tmh
+/home/deepsaint/.local/bin/fozzy validate \
+  standalone_harness/tmh_paper_claim_stress.fozzy.json \
+  --json
+/home/deepsaint/.local/bin/fozzy --json run \
+  standalone_harness/tmh_paper_claim_stress.fozzy.json \
+  --det \
+  --strict \
+  --seed 20260719 \
+  --proc-backend host \
+  --record artifacts/fozzy/tmh_paper_claim_stress.trace.fozzy \
+  --record-collision overwrite
+/home/deepsaint/.local/bin/fozzy trace verify \
+  artifacts/fozzy/tmh_paper_claim_stress.trace.fozzy \
+  --strict \
+  --json
+/home/deepsaint/.local/bin/fozzy replay \
+  artifacts/fozzy/tmh_paper_claim_stress.trace.fozzy \
+  --json
+/home/deepsaint/.local/bin/fozzy ci \
+  artifacts/fozzy/tmh_paper_claim_stress.trace.fozzy \
+  --json
+```
+
+Stress result:
+
+- `40` deterministic traffic runs
+- `15` actual cached model configs
+- `31` base pressure cases
+- `732,000` evaluated rows
+- `682,050` old-KV rows
+- `100%` invariant pass rate
+- conservative old/warm KV pressure floor: `16.071%`
+- production/paper claim number: `at least 16.0% old/warm KV memory-pressure reduction across the tested production model-family stress baseline`
+
+Claim boundary:
+
+- comfortable: TMH supports a production memory-hierarchy / memory-pressure reduction claim
+- comfortable: the promoted number should be the conservative `16.0%+` floor
+- not yet claimed: live vLLM-internal TMH KV management produces end-to-end runtime speedup

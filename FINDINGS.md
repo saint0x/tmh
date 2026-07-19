@@ -637,6 +637,35 @@ Takeaway:
 - use `16.0%+` for production memory-pressure language
 - keep `16.667%` as the Qwen-30B-specific result in detailed benchmark tables
 
+### 30. The 40-run paper stress keeps the production floor intact
+
+The larger pre-paper stress run now exists at:
+
+- `artifacts/tmh_paper_claim_stress/paper-claim-stress-v1/REPORT.md`
+- `artifacts/fozzy/tmh_paper_claim_stress.trace.fozzy`
+
+Scope:
+
+- `40` deterministic traffic runs
+- `15` actual cached model configs
+- `31` base pressure cases
+- `732,000` evaluated rows
+- `682,050` old-KV rows
+- `100%` invariant pass rate
+
+Observed shape:
+
+- every run passes
+- every model passes
+- conservative old/warm KV pressure floor remains `16.071%`
+- promoted public number remains `at least 16.0% old/warm KV memory-pressure reduction across the tested production model-family stress baseline`
+
+Takeaway:
+
+- I am comfortable using `16.0%+` as the production memory-pressure number for the paper
+- I am comfortable claiming that explicit TMH planning gives a robust old/warm KV pressure reduction across the tested model-family stress baseline
+- I am not comfortable claiming live TMH KV-manager runtime speedup until TMH is wired into the vLLM/sock serving internals and rebenchmarked end-to-end
+
 ## Proposed Comparison Matrix
 
 The next TMH plan study should compare:

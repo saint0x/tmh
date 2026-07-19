@@ -83,6 +83,18 @@ The model-family memory baseline now measures the same production TMH planner ac
 
 This replaces the Qwen-30B-only `16.667%` number as the production-wide claim. The Qwen-30B number remains true for that model shape, but the model-family floor is the number to promote.
 
+The pre-paper claim stress suite then expands that baseline to `40` deterministic traffic runs:
+
+- `15` actual cached model configs
+- `31` base pressure cases perturbed across `40` deterministic runs
+- `732,000` evaluated model/page/budget/case rows
+- `682,050` rows with old KV present
+- `100%` invariant pass rate
+- conservative old/warm KV pressure floor: `16.071%`
+- promoted public number remains: `at least 16.0% old/warm KV memory-pressure reduction across the tested production model-family stress baseline`
+
+This is strong enough to use as the paper/product memory-pressure claim. It is still not a claim that TMH has already been wired into live vLLM KV internals for end-to-end runtime speedup.
+
 ## Quickstart
 
 Run the deterministic TMH smoke scenario:
@@ -114,9 +126,11 @@ For harness-specific commands and artifact shapes, see `standalone_harness/READM
 - `artifacts/tmh_30b_maxfit_preflight_layout_sweep/20260719-040423/REPORT.md`: max-fit dry-run preflight sweep.
 - `artifacts/tmh_adversarial_layout_stress/robust-stress-v1/REPORT.md`: adversarial geometry/model-shape stress report.
 - `artifacts/tmh_model_family_memory_baseline/model-family-v1/REPORT.md`: cross-model production memory-pressure baseline.
+- `artifacts/tmh_paper_claim_stress/paper-claim-stress-v1/REPORT.md`: 40-run pre-paper production claim stress report.
 - `artifacts/fozzy/tmh_30b_standard_runs3_layout_sweep.trace.fozzy`: deterministic trace for the strongest layout sweep.
 - `artifacts/fozzy/tmh_adversarial_layout_stress.trace.fozzy`: deterministic host-backed trace for the adversarial stress validator.
 - `artifacts/fozzy/tmh_model_family_memory_baseline.trace.fozzy`: deterministic host-backed trace for the model-family baseline validator.
+- `artifacts/fozzy/tmh_paper_claim_stress.trace.fozzy`: deterministic host-backed trace for the paper-claim stress validator.
 
 ## Design Principles
 

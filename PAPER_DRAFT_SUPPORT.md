@@ -441,6 +441,33 @@ Paper framing:
 - keep `16.667%` as a Qwen-30B-specific result
 - explain that total effective KV pressure reduction depends on the preserved hot raw window, prompt-anchor pages, page rounding, and whether a request has old KV to demote
 
+## Paper Claim Stress Evidence
+
+The current paper package now includes a larger `40`-run stress pass:
+
+- `artifacts/tmh_paper_claim_stress/paper-claim-stress-v1/REPORT.md`
+- `artifacts/fozzy/tmh_paper_claim_stress.trace.fozzy`
+
+Stress scope:
+
+- `40` deterministic traffic variants
+- `15` production model configs
+- `31` base pressure cases
+- `732,000` evaluated rows
+- `682,050` old-KV rows
+- `100%` invariant pass rate
+
+Result:
+
+- conservative old/warm KV pressure floor: `16.071%`
+- promoted paper/product claim: `at least 16.0% old/warm KV memory-pressure reduction across the tested production model-family stress baseline`
+
+Paper framing:
+
+- the paper can confidently claim a robust memory-pressure reduction from explicit TMH planning
+- the claim should be framed as a memory hierarchy / KV pressure result
+- the paper should not yet claim TMH-internal serving-runtime speedup until the vLLM/sock KV manager is integrated and benchmarked end-to-end
+
 ## Reviewer-Critical Points
 
 These are the questions the draft must answer cleanly.

@@ -648,3 +648,46 @@ Interpretation:
 - Qwen-30B still supports `16.667%` for that model shape
 - the cross-model floor is set by Qwen2.5 models with `28` layers and `late_layer_start=18`
 - total effective KV pressure reduction remains workload-dependent because hot raw KV and prompt-anchor pages are intentionally preserved
+
+## Paper Claim Stress
+
+Status: `passed`
+
+Artifact:
+
+- `artifacts/tmh_paper_claim_stress/paper-claim-stress-v1/REPORT.md`
+- `artifacts/fozzy/tmh_paper_claim_stress.trace.fozzy`
+
+Scope:
+
+- deterministic traffic runs: `40`
+- model configs: `15`
+- base pressure cases: `31`
+- evaluated rows: `732,000`
+- old-KV rows: `682,050`
+- page sizes: `8`, `16`, `32`, `64`, `128`
+- budgets: `75`, `50`, `25`, `12.5`, `6.25`, `3.125`, `1`, `0`
+
+Validation:
+
+- direct validator: pass
+- `fozzy validate`: pass
+- `fozzy run --det --strict --proc-backend host --record`: pass
+- `fozzy test --det --strict --proc-backend host`: pass
+- `fozzy doctor --deep --runs 5`: pass with five identical signatures
+- `fozzy trace verify`: pass
+- `fozzy replay`: pass
+- `fozzy ci`: pass
+
+Readout:
+
+- invariant pass rate: `100%`
+- conservative old/warm KV pressure floor: `16.071%`
+- promoted public number: `at least 16.0% old/warm KV memory-pressure reduction across the tested production model-family stress baseline`
+
+Interpretation:
+
+- this is the strongest current evidence package for the production memory-pressure claim
+- the `16.0%+` number survived a 40-run multi-model stress matrix
+- the result is comfortable for a paper claim about explicit transformer memory hierarchy and old/warm KV pressure reduction
+- the remaining claim boundary is runtime integration: do not claim live vLLM-internal TMH speedup until the KV manager is wired into the serving runtime

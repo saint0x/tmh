@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "name": "tmh-paper-claim-stress",
+  "steps": [
+    {
+      "type": "proc_when",
+      "cmd": "/usr/bin/python3",
+      "args": [
+        "/home/deepsaint/work/kv-tiered/tmh/standalone_harness/validate_tmh_paper_claim_stress.py",
+        "artifacts/tmh_paper_claim_stress/paper-claim-stress-v1"
+      ],
+      "exit_code": 0,
+      "stdout": "tmh-paper-claim-stress-ok\n",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "/usr/bin/python3",
+      "args": [
+        "/home/deepsaint/work/kv-tiered/tmh/standalone_harness/validate_tmh_paper_claim_stress.py",
+        "artifacts/tmh_paper_claim_stress/paper-claim-stress-v1"
+      ],
+      "expect_exit": 0,
+      "expect_stdout": "tmh-paper-claim-stress-ok\n"
+    }
+  ]
+}
