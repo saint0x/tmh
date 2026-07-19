@@ -1,0 +1,264 @@
+use core.io;
+use core.path;
+use kv;
+use model;
+struct ArtifactReport {
+    model_dir: str, model_id: str, format: str, config_path: str, mesh_manifest_path: str, tokenizer_path: str, weights_path: str, has_config: i32, has_mesh_manifest: i32, has_tokenizer: i32, has_weights: i32, tensor_parallelism_dim: i32, total_model_bytes: i32, layer_count: i32, hidden_dim: i32, attention_heads: i32, kv_heads: i32, intermediate_size: i32, vocab_size: i32, context_tokens: i32, page_tokens: i32, total_pages: i32, hot_budget_pct: i32, hot_pages: i32, raw_kv_bytes_per_token: i32, raw_kv_bytes_total: i32, fidelity_hot_bytes: i32, fidelity_warm_bytes: i32, quantized_old_warm_bytes: i32, recent_only_cold_bytes: i32,
+}
+fn parse_digit(ch: str) -> i32 {
+    if ch == "0" {
+        return 0
+    }
+    if ch == "1" {
+        return 1
+    }
+    if ch == "2" {
+        return 2
+    }
+    if ch == "3" {
+        return 3
+    }
+    if ch == "4" {
+        return 4
+    }
+    if ch == "5" {
+        return 5
+    }
+    if ch == "6" {
+        return 6
+    }
+    if ch == "7" {
+        return 7
+    }
+    if ch == "8" {
+        return 8
+    }
+    if ch == "9" {
+        return 9
+    }
+    return - 1
+}
+fn parse_i32(text: str) -> i32 {
+    let value = str.trim(text) if value == "" {
+        return 0
+    }
+    let mut sign = 1 let mut idx = 0 if str.slice(value, 0, 1) == "-" {
+        sign = - 1 idx = 1
+    }
+    let mut out = 0 while idx < str.len(value) {
+        let digit = parse_digit(str.slice(value, idx, idx + 1)) if digit >= 0 {
+            out = (out * 10) + digit
+        }
+        idx = idx + 1
+    }
+    return out * sign
+}
+fn parse_first_i32(text: str) -> i32 {
+    let mut idx = 0 while idx < str.len(text) {
+        let ch = str.slice(text, idx, idx + 1) if ch == "-" {
+            let start = idx idx = idx + 1 while idx < str.len(text) {
+                let next = parse_digit(str.slice(text, idx, idx + 1)) if next < 0 {
+                    break
+                }
+                idx = idx + 1
+            }
+            return parse_i32(str.slice(text, start, idx))
+        }
+        if parse_digit(ch) >= 0 {
+            let start = idx idx = idx + 1 while idx < str.len(text) {
+                let next = parse_digit(str.slice(text, idx, idx + 1)) if next < 0 {
+                    break
+                }
+                idx = idx + 1
+            }
+            return parse_i32(str.slice(text, start, idx))
+        }
+        idx = idx + 1
+    }
+    return 0
+}
+fn json_i32(raw: str, key: str, fallback: i32) -> i32 {
+    let needle = str.concat(str.concat("\"", key), "\"") let at = find_substring(raw, needle) if at < 0 {
+        return fallback
+    }
+    let tail = str.slice(raw, at + str.len(needle), str.len(raw)) return parse_first_i32(tail)
+}
+fn json_str(raw: str, key: str, fallback: str) -> str {
+    let needle = str.concat(str.concat("\"", key), "\"") let at = find_substring(raw, needle) if at < 0 {
+        return fallback
+    }
+    let tail = str.slice(raw, at + str.len(needle), str.len(raw)) let first_quote = find_substring(tail, "\"") if first_quote < 0 {
+        return fallback
+    }
+    let after = str.slice(tail, first_quote + 1, str.len(tail)) let second_quote = find_substring(after, "\"") if second_quote < 0 {
+        return fallback
+    }
+    return str.slice(after, 0, second_quote)
+}
+fn model_id_from_dir(model_dir: str) -> str {
+    return path.basename(model_dir)
+}
+fn mesh_config_path(model_dir: str) -> str {
+    return path.join(model_dir, "model.json")
+}
+fn hf_config_path(model_dir: str) -> str {
+    return path.join(model_dir, "config.json")
+}
+fn tokenizer_path(model_dir: str) -> str {
+    return path.join(model_dir, "tokenizer.json")
+}
+fn safetensors_path(model_dir: str) -> str {
+    return path.join(model_dir, "model.safetensors")
+}
+fn weights_text_cache_path(model_dir: str) -> str {
+    return path.join(model_dir, "model.fpa.weights.txt")
+}
+fn pytorch_path(model_dir: str) -> str {
+    return path.join(model_dir, "pytorch_model.bin")
+}
+fn shape_from_hf_config(raw: str, page_tokens: i32) -> model.EngineShape {
+    let layer_count = json_i32(raw, "num_hidden_layers", json_i32(raw, "n_layer", 0)) let hidden_dim = json_i32(raw, "hidden_size", json_i32(raw, "n_embd", 0)) let head_count = json_i32(raw, "num_attention_heads", json_i32(raw, "n_head", 0)) let kv_heads = json_i32(raw, "num_key_value_heads", head_count) let context_tokens = json_i32(raw, "max_position_embeddings", json_i32(raw, "n_positions", json_i32(raw, "n_ctx", 0))) let late_layer_start = if layer_count > 0 {
+        (layer_count * 3) / 4
+    } else {
+        0
+    }
+    let head_dim = if head_count > 0 {
+        hidden_dim / head_count
+    } else {
+        0
+    }
+    let _kv_heads = kv_heads return model.engine_shape(layer_count, head_count, head_dim, page_tokens, context_tokens, late_layer_start)
+}
+fn shape_from_mesh_manifest(raw: str, page_tokens: i32) -> model.EngineShape {
+    let tensor_parallelism_dim = json_i32(raw, "tensor_parallelism_dim", 0) let late_layer_start = 0 let head_count = max_i32(1, json_i32(raw, "attention_head_count", 1)) let head_dim = if tensor_parallelism_dim > 0 {
+        tensor_parallelism_dim / head_count
+    } else {
+        0
+    }
+    return model.engine_shape(max_i32(1, json_i32(raw, "num_layers", 1)), head_count, max_i32(1, head_dim), page_tokens, max_i32(page_tokens, json_i32(raw, "max_context_tokens", page_tokens)), late_layer_start,)
+}
+fn infer_weight_format(model_dir: str) -> str {
+    if io.exists(safetensors_path(model_dir)) == 1 {
+        return "safetensors"
+    }
+    if io.exists(pytorch_path(model_dir)) == 1 {
+        return "pytorch_bin"
+    }
+    return "missing"
+}
+fn inspect_model_dir(model_dir: str, page_tokens: i32, hot_budget_pct: i32) -> ArtifactReport {
+    let hf_config = hf_config_path(model_dir) let mesh_manifest = mesh_config_path(model_dir) let tok_path = tokenizer_path(model_dir) let weight_format = infer_weight_format(model_dir) let weights_path = if weight_format == "safetensors" {
+        safetensors_path(model_dir)
+    } else {
+        pytorch_path(model_dir)
+    }
+    let has_config = io.exists(hf_config) let has_mesh_manifest = io.exists(mesh_manifest) let hf_raw = if has_config == 1 {
+        io.read_text(hf_config)
+    } else {
+        ""
+    }
+    let mesh_raw = if has_mesh_manifest == 1 {
+        io.read_text(mesh_manifest)
+    } else {
+        ""
+    }
+    let shape = resolve_shape(model_dir, page_tokens) let vocab_size = if has_config == 1 {
+        json_i32(hf_raw, "vocab_size", 0)
+    } else {
+        0
+    }
+    let kv_heads = if has_config == 1 {
+        json_i32(hf_raw, "num_key_value_heads", shape.head_count)
+    } else {
+        shape.head_count
+    }
+    let intermediate_size = if has_config == 1 {
+        json_i32(hf_raw, "intermediate_size", json_i32(hf_raw, "n_inner", 0))
+    } else {
+        0
+    }
+    let tensor_parallelism_dim = if has_mesh_manifest == 1 {
+        json_i32(mesh_raw, "tensor_parallelism_dim", 0)
+    } else {
+        0
+    }
+    let total_model_bytes = if has_mesh_manifest == 1 {
+        json_i32(mesh_raw, "total_model_bytes", 0)
+    } else {
+        0
+    }
+    let policy_cfg = runtime_config_for_budget(shape, hot_budget_pct) let table = kv.kv_page_table.create(shape) let fidelity_mem = kv.kv_page_table.memory_report(policy_cfg, shape, table) let quant_mem = kv.kv_page_table.memory_report(runtime_config_for_policy(shape, hot_budget_pct, model.PolicyKind::QuantizedOldKv), shape, table) let recent_mem = kv.kv_page_table.memory_report(runtime_config_for_policy(shape, hot_budget_pct, model.PolicyKind::RecentOnly), shape, table) return ArtifactReport {
+        model_dir: model_dir, model_id: model_id_from_dir(model_dir), format: weight_format, config_path: hf_config, mesh_manifest_path: mesh_manifest, tokenizer_path: tok_path, weights_path: weights_path, has_config: has_config, has_mesh_manifest: has_mesh_manifest, has_tokenizer: io.exists(tok_path), has_weights: io.exists(weights_path), tensor_parallelism_dim: tensor_parallelism_dim, total_model_bytes: total_model_bytes, layer_count: shape.layer_count, hidden_dim: shape.head_count * shape.head_dim, attention_heads: shape.head_count, kv_heads: kv_heads, intermediate_size: intermediate_size, vocab_size: vocab_size, context_tokens: shape.context_tokens, page_tokens: shape.page_tokens, total_pages: model.total_pages(shape), hot_budget_pct: hot_budget_pct, hot_pages: model.hot_pages_from_budget(shape, hot_budget_pct), raw_kv_bytes_per_token: raw_kv_bytes_per_token(shape), raw_kv_bytes_total: raw_kv_bytes_total(shape), fidelity_hot_bytes: fidelity_mem.hot_bytes, fidelity_warm_bytes: fidelity_mem.warm_bytes, quantized_old_warm_bytes: quant_mem.warm_bytes, recent_only_cold_bytes: recent_mem.cold_bytes,
+    }
+}
+fn resolve_shape(model_dir: str, page_tokens: i32) -> model.EngineShape {
+    let hf_config = hf_config_path(model_dir) let mesh_manifest = mesh_config_path(model_dir) let has_config = io.exists(hf_config) let has_mesh_manifest = io.exists(mesh_manifest) let hf_raw = if has_config == 1 {
+        io.read_text(hf_config)
+    } else {
+        ""
+    }
+    let mesh_raw = if has_mesh_manifest == 1 {
+        io.read_text(mesh_manifest)
+    } else {
+        ""
+    }
+    if has_config == 1 {
+        return shape_from_hf_config(hf_raw, page_tokens)
+    }
+    if has_mesh_manifest == 1 {
+        return shape_from_mesh_manifest(mesh_raw, page_tokens)
+    }
+    return model.default_shape()
+}
+fn raw_kv_bytes_per_token(shape: model.EngineShape) -> i32 {
+    return shape.layer_count * shape.head_count * shape.head_dim * 4
+}
+fn raw_kv_bytes_total(shape: model.EngineShape) -> i32 {
+    return raw_kv_bytes_per_token(shape) * shape.context_tokens
+}
+fn runtime_config_for_budget(shape: model.EngineShape, hot_budget_pct: i32) -> RuntimeConfig {
+    return runtime_config_for_policy(shape, hot_budget_pct, model.PolicyKind::FidelityPagedKv)
+}
+struct RuntimeConfig {
+    policy_name: str, hot_pages: i32, active_pages: i32,
+}
+fn find_substring(text_value: str, needle: str) -> i32 {
+    if needle == "" {
+        return 0
+    }
+    let mut idx = 0 while idx + str.len(needle) <= str.len(text_value) {
+        if str.slice(text_value, idx, idx + str.len(needle)) == needle {
+            return idx
+        }
+        idx = idx + 1
+    }
+    return - 1
+}
+fn max_i32(lhs: i32, rhs: i32) -> i32 {
+    if lhs > rhs {
+        return lhs
+    }
+    return rhs
+}
+fn runtime_config_for_policy(shape: model.EngineShape, hot_budget_pct: i32, policy: model.PolicyKind) -> RuntimeConfig {
+    return runtime_config_for_policy_active(shape, hot_budget_pct, policy, model.total_pages(shape))
+}
+fn runtime_config_for_policy_name(shape: model.EngineShape, hot_budget_pct: i32, policy_name: str) -> RuntimeConfig {
+    return runtime_config_for_policy_name_active(shape, hot_budget_pct, policy_name, model.total_pages(shape))
+}
+fn runtime_config_for_policy_active(shape: model.EngineShape, hot_budget_pct: i32, policy: model.PolicyKind, active_pages: i32) -> RuntimeConfig {
+    return runtime_config_for_policy_name_active(shape, hot_budget_pct, model.policy_name(policy), active_pages)
+}
+fn runtime_config_for_policy_name_active(shape: model.EngineShape, hot_budget_pct: i32, policy_name: str, active_pages: i32) -> RuntimeConfig {
+    let safe_active_pages = if active_pages < 0 {
+        0
+    } else {
+        active_pages
+    }
+    let shape_for_budget = model.engine_shape(shape.layer_count, shape.head_count, shape.head_dim, shape.page_tokens, safe_active_pages * shape.page_tokens, shape.late_layer_start) return RuntimeConfig {
+        policy_name: policy_name, hot_pages: model.hot_pages_from_budget(shape_for_budget, hot_budget_pct), active_pages: safe_active_pages,
+    }
+}
+fn report_json(report: ArtifactReport) -> str {
+    let payload = map.new() discard map.set(payload, "model_dir", json.str(report.model_dir)) discard map.set(payload, "model_id", json.str(report.model_id)) discard map.set(payload, "format", json.str(report.format)) discard map.set(payload, "config_path", json.str(report.config_path)) discard map.set(payload, "mesh_manifest_path", json.str(report.mesh_manifest_path)) discard map.set(payload, "tokenizer_path", json.str(report.tokenizer_path)) discard map.set(payload, "weights_path", json.str(report.weights_path)) discard map.set(payload, "has_config", model.json_emit.i32(report.has_config)) discard map.set(payload, "has_mesh_manifest", model.json_emit.i32(report.has_mesh_manifest)) discard map.set(payload, "has_tokenizer", model.json_emit.i32(report.has_tokenizer)) discard map.set(payload, "has_weights", model.json_emit.i32(report.has_weights)) discard map.set(payload, "tensor_parallelism_dim", model.json_emit.i32(report.tensor_parallelism_dim)) discard map.set(payload, "total_model_bytes", model.json_emit.i32(report.total_model_bytes)) discard map.set(payload, "layer_count", model.json_emit.i32(report.layer_count)) discard map.set(payload, "hidden_dim", model.json_emit.i32(report.hidden_dim)) discard map.set(payload, "attention_heads", model.json_emit.i32(report.attention_heads)) discard map.set(payload, "kv_heads", model.json_emit.i32(report.kv_heads)) discard map.set(payload, "intermediate_size", model.json_emit.i32(report.intermediate_size)) discard map.set(payload, "vocab_size", model.json_emit.i32(report.vocab_size)) discard map.set(payload, "context_tokens", model.json_emit.i32(report.context_tokens)) discard map.set(payload, "page_tokens", model.json_emit.i32(report.page_tokens)) discard map.set(payload, "total_pages", model.json_emit.i32(report.total_pages)) discard map.set(payload, "hot_budget_pct", model.json_emit.i32(report.hot_budget_pct)) discard map.set(payload, "hot_pages", model.json_emit.i32(report.hot_pages)) discard map.set(payload, "raw_kv_bytes_per_token", model.json_emit.i32(report.raw_kv_bytes_per_token)) discard map.set(payload, "raw_kv_bytes_total", model.json_emit.i32(report.raw_kv_bytes_total)) discard map.set(payload, "fidelity_hot_bytes", model.json_emit.i32(report.fidelity_hot_bytes)) discard map.set(payload, "fidelity_warm_bytes", model.json_emit.i32(report.fidelity_warm_bytes)) discard map.set(payload, "quantized_old_warm_bytes", model.json_emit.i32(report.quantized_old_warm_bytes)) discard map.set(payload, "recent_only_cold_bytes", model.json_emit.i32(report.recent_only_cold_bytes)) return json.object(payload)
+}

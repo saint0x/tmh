@@ -1,0 +1,12 @@
+use model;
+struct PrefillReport {
+    model_id: str, family: str, prompt_token_count: i32, activation_seed: i32, route_seed: i32, artifact_fingerprint: i32,
+}
+fn report(loaded: model.model_loader.LoadedModel, prompt: model.tokenizer_bridge.TokenizedText) -> PrefillReport {
+    let prefill = model.qwen_runner.prefill(loaded, prompt) return PrefillReport {
+        model_id: loaded.model_id, family: loaded.family, prompt_token_count: prefill.prompt_token_count, activation_seed: prefill.activation_seed, route_seed: prefill.route_seed, artifact_fingerprint: loaded.artifact_fingerprint,
+    }
+}
+fn report_json(report: PrefillReport) -> str {
+    let payload = map.new() discard map.set(payload, "model_id", json.str(report.model_id)) discard map.set(payload, "family", json.str(report.family)) discard map.set(payload, "prompt_token_count", model.json_emit.i32(report.prompt_token_count)) discard map.set(payload, "activation_seed", model.json_emit.i32(report.activation_seed)) discard map.set(payload, "route_seed", model.json_emit.i32(report.route_seed)) discard map.set(payload, "artifact_fingerprint", model.json_emit.i32(report.artifact_fingerprint)) return json.object(payload)
+}

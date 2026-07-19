@@ -1,0 +1,252 @@
+use core.env;
+use kv;
+use model;
+use runtime.block_manager;
+struct SessionConfig {
+    model_dir: str, page_tokens: i32, hot_budget_pct: i32, prompt_tokens: i32, decode_tokens: i32, policy_name: str,
+}
+fn config(model_dir: str, page_tokens: i32, hot_budget_pct: i32, prompt_tokens: i32, decode_tokens: i32, policy_name: str) -> SessionConfig {
+    return SessionConfig {
+        model_dir: model_dir, page_tokens: page_tokens, hot_budget_pct: hot_budget_pct, prompt_tokens: prompt_tokens, decode_tokens: decode_tokens, policy_name: policy_name,
+    }
+}
+fn effective_policy(cfg: SessionConfig) -> model.PolicyKind {
+    return model.policy_from_str(cfg.policy_name)
+}
+struct SessionState {
+    prompt_tokens: i32, decode_tokens: i32, total_tokens: i32, prefill_pages: i32, decode_pages: i32, used_pages: i32, tail_page_tokens: i32, hot_budget_pct: i32, hot_pages: i32, recent_start_page: i32,
+}
+fn ceil_div(numer: i32, denom: i32) -> i32 {
+    if numer <= 0 {
+        return 0
+    }
+    if denom <= 0 {
+        return 0
+    }
+    let div = numer / denom if numer% denom == 0 {
+        return div
+    }
+    return div + 1
+}
+fn parse_env_i32(key: str, fallback: i32) -> i32 {
+    let value = env.get(key) if value == "" {
+        return fallback
+    }
+    return model.artifacts.parse_i32(value)
+}
+fn clamp_tokens(value: i32, max_tokens: i32) -> i32 {
+    if value < 0 {
+        return 0
+    }
+    if value > max_tokens {
+        return max_tokens
+    }
+    return value
+}
+fn hot_pages_for_active(active_pages: i32, hot_budget_pct: i32) -> i32 {
+    if active_pages <= 0 {
+        return 0
+    }
+    if hot_budget_pct <= 0 {
+        return 0
+    }
+    let mut hot = (active_pages * hot_budget_pct) / 100 if (active_pages * hot_budget_pct)% 100 != 0 {
+        hot = hot + 1
+    }
+    if hot < 1 {
+        hot = 1
+    }
+    if hot > active_pages {
+        hot = active_pages
+    }
+    return hot
+}
+fn from_env(shape: model.EngineShape, model_dir: str) -> SessionConfig {
+    let page_tokens = parse_env_i32("FPA_PAGE_TOKENS", shape.page_tokens) let hot_budget_pct = parse_env_i32("FPA_HOT_BUDGET_PCT", 25) let policy_name = if env.get("FPA_POLICY") == "" {
+        "fidelity_paged_kv"
+    } else {
+        env.get("FPA_POLICY")
+    }
+    let prompt_tokens = clamp_tokens(parse_env_i32("FPA_PROMPT_TOKENS", min_i32(256, shape.context_tokens)), shape.context_tokens) let remaining = shape.context_tokens - prompt_tokens let decode_tokens = clamp_tokens(parse_env_i32("FPA_DECODE_TOKENS", min_i32(64, remaining)), remaining) return config(model_dir, page_tokens, hot_budget_pct, prompt_tokens, decode_tokens, policy_name)
+}
+fn state(shape: model.EngineShape, cfg: SessionConfig) -> SessionState {
+    return state_fields(shape, cfg.model_dir, cfg.page_tokens, cfg.hot_budget_pct, cfg.prompt_tokens, cfg.decode_tokens, cfg.policy_name)
+}
+fn state_record(prompt_tokens: i32, decode_tokens: i32, total_tokens: i32, prefill_pages: i32, decode_pages: i32, used_pages: i32, tail_page_tokens: i32, hot_budget_pct: i32, hot_pages: i32, recent_start_page: i32) -> SessionState {
+    return SessionState {
+        prompt_tokens: prompt_tokens, decode_tokens: decode_tokens, total_tokens: total_tokens, prefill_pages: prefill_pages, decode_pages: decode_pages, used_pages: used_pages, tail_page_tokens: tail_page_tokens, hot_budget_pct: hot_budget_pct, hot_pages: hot_pages, recent_start_page: recent_start_page,
+    }
+}
+fn state_fields(shape: model.EngineShape, model_dir: str, page_tokens: i32, hot_budget_pct: i32, prompt_tokens: i32, decode_tokens: i32, policy_name: str) -> SessionState {
+    let _model_dir = model_dir
+    let total_tokens = prompt_tokens + decode_tokens let prefill_pages = ceil_div(prompt_tokens, page_tokens) let used_pages = ceil_div(total_tokens, page_tokens) let decode_pages = used_pages - prefill_pages let mut tail_page_tokens = 0 if total_tokens > 0 {
+        tail_page_tokens = total_tokens% page_tokens if tail_page_tokens == 0 {
+            tail_page_tokens = page_tokens
+        }
+    }
+    let _policy_name = policy_name
+    let hot_pages = hot_pages_for_active(used_pages, hot_budget_pct) let recent_start_page = if hot_pages >= used_pages {
+        0
+    } else {
+        used_pages - hot_pages
+    }
+    if env.get("FPA_TRACE_RUNTIME") == "1" {
+        discard term.write(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat("FPA_TRACE_SESSION state_fields policy=", policy_name), str.concat(" prompt_tokens=", str.from_i32(prompt_tokens))), str.concat(" decode_tokens=", str.from_i32(decode_tokens))), str.concat(" total_tokens=", str.from_i32(total_tokens))), str.concat(" used_pages=", str.from_i32(used_pages))), str.concat(" hot_pages=", str.from_i32(hot_pages))), "\n"))
+    }
+    return SessionState {
+        prompt_tokens: prompt_tokens, decode_tokens: decode_tokens, total_tokens: total_tokens, prefill_pages: prefill_pages, decode_pages: decode_pages, used_pages: used_pages, tail_page_tokens: tail_page_tokens, hot_budget_pct: hot_budget_pct, hot_pages: hot_pages, recent_start_page: recent_start_page,
+    }
+}
+fn state_with_sequence_fields(shape: model.EngineShape, model_dir: str, page_tokens: i32, hot_budget_pct: i32, prompt_tokens: i32, decode_tokens: i32, policy_name: str, sequence_token_ids_wire: str) -> SessionState {
+    let total_tokens = token_count_from_wire(sequence_token_ids_wire)
+    let derived_decode_tokens = max_i32(0, total_tokens - prompt_tokens)
+    let _decode_tokens = decode_tokens
+    return state_fields(shape, model_dir, page_tokens, hot_budget_pct, prompt_tokens, derived_decode_tokens, policy_name)
+}
+fn state_with_sequence_parts_fields(shape: model.EngineShape, model_dir: str, page_tokens: i32, hot_budget_pct: i32, prompt_tokens: i32, decode_tokens: i32, policy_name: str, prompt_token_ids_wire: str, decode_token_ids_wire: str) -> SessionState {
+    let derived_prompt_tokens = if prompt_token_ids_wire == "" {
+        prompt_tokens
+    } else {
+        token_count_from_wire(prompt_token_ids_wire)
+    }
+    let derived_decode_tokens = if decode_token_ids_wire == "" {
+        0
+    } else {
+        token_count_from_wire(decode_token_ids_wire)
+    }
+    let _decode_tokens = decode_tokens
+    return state_fields(shape, model_dir, page_tokens, hot_budget_pct, derived_prompt_tokens, derived_decode_tokens, policy_name)
+}
+fn state_with_sequence(shape: model.EngineShape, cfg: SessionConfig, sequence_token_ids_wire: str) -> SessionState {
+    return state_with_sequence_fields(shape, cfg.model_dir, cfg.page_tokens, cfg.hot_budget_pct, cfg.prompt_tokens, cfg.decode_tokens, cfg.policy_name, sequence_token_ids_wire)
+}
+fn state_with_sequence_parts(shape: model.EngineShape, cfg: SessionConfig, prompt_token_ids_wire: str, decode_token_ids_wire: str) -> SessionState {
+    return state_with_sequence_parts_fields(shape, cfg.model_dir, cfg.page_tokens, cfg.hot_budget_pct, cfg.prompt_tokens, cfg.decode_tokens, cfg.policy_name, prompt_token_ids_wire, decode_token_ids_wire)
+}
+fn state_with_prompt(shape: model.EngineShape, cfg: SessionConfig, prompt: model.tokenizer_bridge.TokenizedText, decode_token_ids_wire: str) -> SessionState {
+    return state_with_sequence_parts_fields(shape, cfg.model_dir, cfg.page_tokens, cfg.hot_budget_pct, token_count_from_wire(prompt.token_ids_wire), cfg.decode_tokens, cfg.policy_name, prompt.token_ids_wire, decode_token_ids_wire)
+}
+fn manager_of(shape: model.EngineShape, policy_name: str, state: SessionState) -> runtime.block_manager.ManagedSession {
+    if env.get("FPA_TRACE_RUNTIME") == "1" {
+        discard term.write(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat("FPA_TRACE_SESSION manager_of policy=", policy_name), str.concat(" hot_budget_pct=", str.from_i32(state.hot_budget_pct))), str.concat(" used_pages=", str.from_i32(state.used_pages))), str.concat(" tail_page_tokens=", str.from_i32(state.tail_page_tokens))), str.concat(" decode_tokens=", str.from_i32(state.decode_tokens))), str.concat(" seq_tokens=", str.from_i32(state.total_tokens))), "\n"))
+    }
+    return runtime.block_manager.build_session_planned(shape, state.hot_budget_pct, policy_name, state.used_pages, state.tail_page_tokens, state.prefill_pages, state.recent_start_page)
+}
+fn begin(shape: model.EngineShape, cfg: SessionConfig) -> SessionState {
+    let prompt_only = config(cfg.model_dir, cfg.page_tokens, cfg.hot_budget_pct, cfg.prompt_tokens, 0, cfg.policy_name) return state(shape, prompt_only)
+}
+fn begin_with_prompt(shape: model.EngineShape, cfg: SessionConfig, prompt: model.tokenizer_bridge.TokenizedText) -> SessionState {
+    let prompt_count = token_count_from_wire(prompt.token_ids_wire) return state_fields(shape, cfg.model_dir, cfg.page_tokens, cfg.hot_budget_pct, prompt_count, 0, cfg.policy_name)
+}
+fn advance(shape: model.EngineShape, cfg: SessionConfig, current: SessionState) -> SessionState {
+    let placeholder = next_placeholder_token_id("", current.total_tokens) return advance_with_token(shape, cfg, current, placeholder)
+}
+fn advance_with_token_fields(shape: model.EngineShape, cfg: SessionConfig, prompt_tokens: i32, decode_tokens: i32, token_id: i32) -> SessionState {
+    let _token_id = token_id
+    let next_decode_tokens = decode_tokens + 1 if env.get("FPA_TRACE_RUNTIME") == "1" {
+        discard term.write(str.concat(str.concat(str.concat("FPA_TRACE_SESSION rebuild prompt_tokens=", str.from_i32(prompt_tokens)), str.concat(" next_decode_tokens=", str.from_i32(next_decode_tokens))), str.concat(str.concat(" next_sequence_tokens=", str.from_i32(prompt_tokens + next_decode_tokens)), "\n")))
+    }
+    let total_tokens = prompt_tokens + next_decode_tokens let prefill_pages = ceil_div(prompt_tokens, cfg.page_tokens) let used_pages = ceil_div(total_tokens, cfg.page_tokens) let decode_pages = used_pages - prefill_pages let mut tail_page_tokens = 0 if total_tokens > 0 {
+        tail_page_tokens = total_tokens% cfg.page_tokens if tail_page_tokens == 0 {
+            tail_page_tokens = cfg.page_tokens
+        }
+    }
+    if env.get("FPA_TRACE_RUNTIME") == "1" {
+        discard term.write(str.concat(str.concat(str.concat(str.concat("FPA_TRACE_SESSION rebuild_layout prefill_pages=", str.from_i32(prefill_pages)), str.concat(" used_pages=", str.from_i32(used_pages))), str.concat(" decode_pages=", str.from_i32(decode_pages))), str.concat(str.concat(" tail_page_tokens=", str.from_i32(tail_page_tokens)), "\n")))
+    }
+    let _shape = shape let hot_pages = hot_pages_for_active(used_pages, cfg.hot_budget_pct) let recent_start_page = if hot_pages >= used_pages {
+        0
+    } else {
+        used_pages - hot_pages
+    }
+    if env.get("FPA_TRACE_RUNTIME") == "1" {
+        discard term.write(str.concat(str.concat(str.concat(str.concat("FPA_TRACE_SESSION rebuild_state used_pages=", str.from_i32(used_pages)), str.concat(" tail_page_tokens=", str.from_i32(tail_page_tokens))), str.concat(" hot_pages=", str.from_i32(hot_pages))), "\n"))
+    }
+    return SessionState {
+        prompt_tokens: prompt_tokens, decode_tokens: next_decode_tokens, total_tokens: total_tokens, prefill_pages: prefill_pages, decode_pages: decode_pages, used_pages: used_pages, tail_page_tokens: tail_page_tokens, hot_budget_pct: cfg.hot_budget_pct, hot_pages: hot_pages, recent_start_page: recent_start_page,
+    }
+}
+fn advance_with_token(shape: model.EngineShape, cfg: SessionConfig, current: SessionState, token_id: i32) -> SessionState {
+    return advance_with_token_fields(shape, cfg, current.prompt_tokens, current.decode_tokens, token_id)
+}
+fn token_id_at(sequence_token_ids_wire: str, position: i32) -> i32 {
+    return token_id_from_wire(sequence_token_ids_wire, position)
+}
+fn token_id_at_parts(state: SessionState, prompt_token_ids_wire: str, decode_token_ids_wire: str, position: i32) -> i32 {
+    if position < state.prompt_tokens {
+        return token_id_from_wire(prompt_token_ids_wire, position)
+    }
+    return token_id_from_wire(decode_token_ids_wire, position - state.prompt_tokens)
+}
+fn token_count_from_wire(token_ids_wire: str) -> i32 {
+    if token_ids_wire == "" {
+        return 0
+    }
+    return str.len(token_ids_wire) / model.tokenizer_bridge.token_wire_width()
+}
+fn token_id_from_wire(token_ids_wire: str, position: i32) -> i32 {
+    return model.tokenizer_bridge.token_id_from_wire(token_ids_wire, position)
+}
+fn append_token_wire(token_ids_wire: str, token_id: i32) -> str {
+    return model.tokenizer_bridge.append_token_wire(token_ids_wire, token_id)
+}
+fn placeholder_sequence_wire(token_count: i32) -> str {
+    let mut wire = "" let mut idx = 0 while idx < token_count {
+        wire = append_token_wire(wire, idx) idx = idx + 1
+    }
+    return wire
+}
+fn placeholder_sequence_range_wire(start_token_id: i32, token_count: i32) -> str {
+    let mut wire = "" let mut idx = 0 while idx < token_count {
+        wire = append_token_wire(wire, start_token_id + idx) idx = idx + 1
+    }
+    return wire
+}
+fn token_wire_prefix(token_ids_wire: str, count: i32) -> str {
+    let mut wire = "" let mut idx = 0 while idx < count {
+        wire = append_token_wire(wire, token_id_from_wire(token_ids_wire, idx)) idx = idx + 1
+    }
+    return wire
+}
+fn token_wire_slice(token_ids_wire: str, start_position: i32) -> str {
+    let total = token_count_from_wire(token_ids_wire) let mut wire = "" let mut idx = start_position while idx < total {
+        wire = append_token_wire(wire, token_id_from_wire(token_ids_wire, idx)) idx = idx + 1
+    }
+    return wire
+}
+fn full_sequence_wire(prompt_token_ids_wire: str, decode_token_ids_wire: str) -> str {
+    if decode_token_ids_wire == "" {
+        return prompt_token_ids_wire
+    }
+    if prompt_token_ids_wire == "" {
+        return decode_token_ids_wire
+    }
+    return str.concat(prompt_token_ids_wire, decode_token_ids_wire)
+}
+fn next_placeholder_token_id(token_ids_wire: str, token_count: i32) -> i32 {
+    let _token_ids_wire = token_ids_wire return token_count
+}
+fn token_count_for_page(state: SessionState, page_tokens: i32, page_id: i32) -> i32 {
+    if page_id < 0 {
+        return 0
+    }
+    if page_id >= state.used_pages {
+        return 0
+    }
+    if page_id < state.used_pages - 1 {
+        return page_tokens
+    }
+    return state.tail_page_tokens
+}
+fn min_i32(lhs: i32, rhs: i32) -> i32 {
+    if lhs < rhs {
+        return lhs
+    }
+    return rhs
+}
+fn max_i32(lhs: i32, rhs: i32) -> i32 {
+    if lhs > rhs {
+        return lhs
+    }
+    return rhs
+}

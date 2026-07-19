@@ -1,0 +1,43 @@
+use kv;
+use model;
+struct PageTable {
+    total_pages: i32,
+}
+struct MemoryReport {
+    hot_bytes: i32, warm_bytes: i32, cold_bytes: i32,
+}
+fn create(shape: model.EngineShape) -> PageTable {
+    return PageTable {
+        total_pages: model.total_pages(shape),
+    }
+}
+fn create_active(active_pages: i32) -> PageTable {
+    return PageTable {
+        total_pages: active_pages,
+    }
+}
+fn page(shape: model.EngineShape, cfg: model.artifacts.RuntimeConfig, layer_id: i32, page_id: i32) -> kv.kv_page.KVPage {
+    return kv.kv_page.configured_page(layer_id, page_id, shape, kv.kv_policy.k_precision_for(shape, cfg, layer_id, page_id), kv.kv_policy.v_precision_for(shape, cfg, layer_id, page_id), kv.kv_policy.role_for_page(shape, cfg, layer_id, page_id), kv.kv_policy.is_hot_page(shape, cfg, page_id),)
+}
+fn memory_report(cfg: model.artifacts.RuntimeConfig, shape: model.EngineShape, table: PageTable) -> MemoryReport {
+    let mut hot_bytes = 0 let mut warm_bytes = 0 let mut cold_bytes = 0 let mut layer_id = 0 while layer_id < shape.layer_count {
+        let mut page_id = 0 while page_id < table.total_pages {
+            let entry = page(shape, cfg, layer_id, page_id) let k_bytes = kv.kv_allocator.encoded_k_bytes(shape, entry.k_precision) let v_bytes = kv.kv_allocator.encoded_v_bytes(shape, entry.v_precision) if entry.is_hot == 1 {
+                hot_bytes = hot_bytes + k_bytes + v_bytes
+            } else if entry.k_precision == kv.kv_page.Precision::Dropped {
+                if entry.v_precision == kv.kv_page.Precision::Dropped {
+                    cold_bytes = cold_bytes + kv.kv_allocator.raw_k_bytes_per_page(shape) + kv.kv_allocator.raw_v_bytes_per_page(shape)
+                } else {
+                    warm_bytes = warm_bytes + k_bytes + v_bytes
+                }
+            } else {
+                warm_bytes = warm_bytes + k_bytes + v_bytes
+            }
+            page_id = page_id + 1
+        }
+        layer_id = layer_id + 1
+    }
+    return MemoryReport {
+        hot_bytes: hot_bytes, warm_bytes: warm_bytes, cold_bytes: cold_bytes,
+    }
+}

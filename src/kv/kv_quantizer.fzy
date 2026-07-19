@@ -1,0 +1,18 @@
+use kv;
+fn key_penalty(precision: kv.kv_page.Precision) -> i32 {
+    match precision {
+        kv.kv_page.Precision::Raw => return 0, kv.kv_page.Precision::Int8 => return 2, kv.kv_page.Precision::Int4 => return 18, _ => return 10000,
+    }
+}
+fn value_penalty(precision: kv.kv_page.Precision, protected_late_layer: i32) -> i32 {
+    if precision == kv.kv_page.Precision::Raw {
+        return 0
+    }
+    if precision == kv.kv_page.Precision::Int8 {
+        return 2
+    }
+    if protected_late_layer == 1 {
+        return 12
+    }
+    return 6
+}

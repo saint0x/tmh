@@ -1,0 +1,183 @@
+use model;
+
+struct PageRangePlan {
+    layer_start: i32,
+    layer_end: i32,
+    page_start: i32,
+    page_end: i32,
+    semantic_class: str,
+    pin: i32,
+    k_precision_name: str,
+    v_precision_name: str,
+    residency_tier: str,
+    promotion_priority: i32,
+    demotion_priority: i32,
+    recompute_priority: i32,
+    authority: str,
+}
+
+struct TMHMemoryPlan {
+    policy_name: str,
+    prompt_pages: i32,
+    recent_start_page: i32,
+    ranges_wire: str,
+}
+
+fn frame_push(wire: str, value: str) -> str {
+    return str.concat(str.concat(str.concat(wire, str.from_i32(str.len(value))), "#"), value)
+}
+
+fn frame_sep(wire: str, start: i32) -> i32 {
+    let mut idx = start while idx < str.len(wire) {
+        if str.slice(wire, idx, idx + 1) == "#" {
+            return idx
+        }
+        idx = idx + 1
+    }
+    return - 1
+}
+
+fn frame_value_at(wire: str, position: i32) -> str {
+    if position < 0 {
+        return ""
+    }
+    let mut current = 0 let mut idx = 0 while idx < str.len(wire) {
+        let sep = frame_sep(wire, idx) if sep < 0 {
+            return ""
+        }
+        let size = model.artifacts.parse_i32(str.slice(wire, idx, sep)) let start = sep + 1 let end = start + size if current == position {
+            return str.slice(wire, start, end)
+        }
+        current = current + 1 idx = end
+    }
+    return ""
+}
+
+fn range_wire(plan: PageRangePlan) -> str {
+    let mut wire = "" wire = frame_push(wire, str.from_i32(plan.layer_start)) wire = frame_push(wire, str.from_i32(plan.layer_end)) wire = frame_push(wire, str.from_i32(plan.page_start)) wire = frame_push(wire, str.from_i32(plan.page_end)) wire = frame_push(wire, plan.semantic_class) wire = frame_push(wire, str.from_i32(plan.pin)) wire = frame_push(wire, plan.k_precision_name) wire = frame_push(wire, plan.v_precision_name) wire = frame_push(wire, plan.residency_tier) wire = frame_push(wire, str.from_i32(plan.promotion_priority)) wire = frame_push(wire, str.from_i32(plan.demotion_priority)) wire = frame_push(wire, str.from_i32(plan.recompute_priority)) wire = frame_push(wire, plan.authority) return wire
+}
+
+fn range_from_wire(wire: str) -> PageRangePlan {
+    return PageRangePlan {
+        layer_start: model.artifacts.parse_i32(frame_value_at(wire, 0)), layer_end: model.artifacts.parse_i32(frame_value_at(wire, 1)), page_start: model.artifacts.parse_i32(frame_value_at(wire, 2)), page_end: model.artifacts.parse_i32(frame_value_at(wire, 3)), semantic_class: frame_value_at(wire, 4), pin: model.artifacts.parse_i32(frame_value_at(wire, 5)), k_precision_name: frame_value_at(wire, 6), v_precision_name: frame_value_at(wire, 7), residency_tier: frame_value_at(wire, 8), promotion_priority: model.artifacts.parse_i32(frame_value_at(wire, 9)), demotion_priority: model.artifacts.parse_i32(frame_value_at(wire, 10)), recompute_priority: model.artifacts.parse_i32(frame_value_at(wire, 11)), authority: frame_value_at(wire, 12),
+    }
+}
+
+fn append_range(ranges_wire: str, plan: PageRangePlan) -> str {
+    return frame_push(ranges_wire, range_wire(plan))
+}
+
+fn plan(policy_name: str, prompt_pages: i32, recent_start_page: i32, ranges_wire: str) -> TMHMemoryPlan {
+    return TMHMemoryPlan {
+        policy_name: policy_name, prompt_pages: prompt_pages, recent_start_page: recent_start_page, ranges_wire: ranges_wire,
+    }
+}
+
+fn range_count(ranges_wire: str) -> i32 {
+    let mut count = 0 let mut idx = 0 while idx < str.len(ranges_wire) {
+        let sep = frame_sep(ranges_wire, idx) if sep < 0 {
+            return count
+        }
+        let size = model.artifacts.parse_i32(str.slice(ranges_wire, idx, sep)) idx = sep + 1 + size count = count + 1
+    }
+    return count
+}
+
+fn range_matches(plan: PageRangePlan, layer_id: i32, page_id: i32) -> i32 {
+    if layer_id < plan.layer_start || layer_id > plan.layer_end {
+        return 0
+    }
+    if page_id < plan.page_start || page_id > plan.page_end {
+        return 0
+    }
+    return 1
+}
+
+fn range_for(compiled: TMHMemoryPlan, layer_id: i32, page_id: i32) -> PageRangePlan {
+    let mut idx = 0 while idx < range_count(compiled.ranges_wire) {
+        let current = range_from_wire(frame_value_at(compiled.ranges_wire, idx)) if range_matches(current, layer_id, page_id) == 1 {
+            return current
+        }
+        idx = idx + 1
+    }
+    return PageRangePlan {
+        layer_start: 0, layer_end: - 1, page_start: 0, page_end: - 1, semantic_class: "", pin: 0, k_precision_name: "", v_precision_name: "", residency_tier: "", promotion_priority: 0, demotion_priority: 0, recompute_priority: 0, authority: "",
+    }
+}
+
+fn append_hot_range(shape: model.EngineShape, used_pages: i32, recent_start_page: i32, ranges_wire: str) -> str {
+    if recent_start_page >= used_pages {
+        return ranges_wire
+    }
+    return append_range(ranges_wire, PageRangePlan {
+        layer_start: 0, layer_end: shape.layer_count - 1, page_start: recent_start_page, page_end: used_pages - 1, semantic_class: "recent_tail", pin: 0, k_precision_name: "raw", v_precision_name: "raw", residency_tier: "hot", promotion_priority: 100, demotion_priority: 0, recompute_priority: 0, authority: "hard",
+    }
+    )
+}
+
+fn append_pinned_prompt_head(shape: model.EngineShape, prompt_pages: i32, ranges_wire: str) -> str {
+    if prompt_pages <= 0 {
+        return ranges_wire
+    }
+    return append_range(ranges_wire, PageRangePlan {
+        layer_start: 0, layer_end: shape.layer_count - 1, page_start: 0, page_end: 0, semantic_class: "prompt_anchor", pin: 1, k_precision_name: "raw", v_precision_name: "raw", residency_tier: "pinned", promotion_priority: 100, demotion_priority: 0, recompute_priority: 0, authority: "hard",
+    }
+    )
+}
+
+fn append_old_policy_ranges(shape: model.EngineShape, policy_name: str, old_start_page: i32, old_end_page: i32, ranges_wire: str) -> str {
+    if old_start_page > old_end_page {
+        return ranges_wire
+    }
+    if policy_name == "recent_only" {
+        return append_range(ranges_wire, PageRangePlan {
+            layer_start: 0, layer_end: shape.layer_count - 1, page_start: old_start_page, page_end: old_end_page, semantic_class: "evicted_history", pin: 0, k_precision_name: "dropped", v_precision_name: "dropped", residency_tier: "cold", promotion_priority: 0, demotion_priority: 100, recompute_priority: 100, authority: "hard",
+        }
+        )
+    }
+    if policy_name == "quantized_old_kv" {
+        return append_range(ranges_wire, PageRangePlan {
+            layer_start: 0, layer_end: shape.layer_count - 1, page_start: old_start_page, page_end: old_end_page, semantic_class: "compressed_history", pin: 0, k_precision_name: "int8", v_precision_name: "int8", residency_tier: "warm", promotion_priority: 25, demotion_priority: 75, recompute_priority: 50, authority: "hard",
+        }
+        )
+    }
+    let mut next = ranges_wire if shape.late_layer_start > 0 {
+        next = append_range(next, PageRangePlan {
+            layer_start: 0, layer_end: shape.late_layer_start - 1, page_start: old_start_page, page_end: old_end_page, semantic_class: "prefill_payload", pin: 0, k_precision_name: "int8", v_precision_name: "int4", residency_tier: "warm", promotion_priority: 25, demotion_priority: 75, recompute_priority: 50, authority: "hard",
+        }
+        )
+    }
+    if shape.late_layer_start < shape.layer_count {
+        next = append_range(next, PageRangePlan {
+            layer_start: shape.late_layer_start, layer_end: shape.layer_count - 1, page_start: old_start_page, page_end: old_end_page, semantic_class: "late_layer_payload", pin: 0, k_precision_name: "int8", v_precision_name: "int8", residency_tier: "warm", promotion_priority: 35, demotion_priority: 65, recompute_priority: 50, authority: "hard",
+        }
+        )
+    }
+    return next
+}
+
+fn compile(shape: model.EngineShape, policy_name: str, used_pages: i32, prompt_pages: i32, recent_start_page: i32) -> TMHMemoryPlan {
+    let mut ranges_wire = ""
+    if policy_name == "full_kv" || policy_name == "paged_full_kv" {
+        ranges_wire = append_range(ranges_wire, PageRangePlan {
+            layer_start: 0, layer_end: shape.layer_count - 1, page_start: 0, page_end: used_pages - 1, semantic_class: "flat_raw_cache", pin: 0, k_precision_name: "raw", v_precision_name: "raw", residency_tier: "hot", promotion_priority: 100, demotion_priority: 0, recompute_priority: 0, authority: "hard",
+        }
+        )
+        return plan(policy_name, prompt_pages, recent_start_page, ranges_wire)
+    }
+    if policy_name == "fidelity_paged_kv" {
+        ranges_wire = append_pinned_prompt_head(shape, prompt_pages, ranges_wire)
+    }
+    ranges_wire = append_hot_range(shape, used_pages, recent_start_page, ranges_wire)
+    let old_start_page = if policy_name == "fidelity_paged_kv" && prompt_pages > 0 {
+        1
+    } else {
+        0
+    }
+    let old_end_page = recent_start_page - 1 ranges_wire = append_old_policy_ranges(shape, policy_name, old_start_page, old_end_page, ranges_wire)
+    return plan(policy_name, prompt_pages, recent_start_page, ranges_wire)
+}
+
+fn report_json(compiled: TMHMemoryPlan) -> str {
+    let payload = map.new() discard map.set(payload, "policy", json.str(compiled.policy_name)) discard map.set(payload, "prompt_pages", model.json_emit.i32(compiled.prompt_pages)) discard map.set(payload, "recent_start_page", model.json_emit.i32(compiled.recent_start_page)) discard map.set(payload, "range_count", model.json_emit.i32(range_count(compiled.ranges_wire))) return json.object(payload)
+}

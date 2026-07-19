@@ -1,0 +1,559 @@
+use core.env;
+use core.fs;
+use core.path;
+use bench.benchmark_runner;
+use bench.stress_suite;
+use model;
+struct ArtifactManifest {
+    summary_json_path: str, summary_csv_path: str, budgets_jsonl_path: str, samples_jsonl_path: str, samples_csv_path: str, failures_jsonl_path: str, failures_csv_path: str, report_md_path: str, budget_count: i32, suite_size: i32, sample_rows: i32, failure_rows: i32,
+}
+fn trace_enabled() -> i32 {
+    if env.get("FPA_TRACE_RUNTIME") == "1" {
+        return 1
+    }
+    return 0
+}
+fn trace_line(label: str) {
+    if trace_enabled() == 1 {
+        discard term.write(str.concat(str.concat("FPA_TRACE_WRITER ", label), "\n"))
+    }
+}
+fn aggregate_json(report: bench.benchmark_runner.PolicyAggregate) -> str {
+    let payload = map.new() discard map.set(payload, "policy", json.str(report.policy_name)) discard map.set(payload, "sample_count", model.json_emit.i32(report.sample_count)) discard map.set(payload, "exact_match_count", model.json_emit.i32(report.exact_match_count)) discard map.set(payload, "contains_target_count", model.json_emit.i32(report.contains_target_count)) discard map.set(payload, "matching_tokens", model.json_emit.i32(report.matching_tokens)) discard map.set(payload, "total_tokens", model.json_emit.i32(report.total_tokens)) discard map.set(payload, "top1_agreement_pct", model.json_emit.i32(report.top1_agreement_pct)) discard map.set(payload, "avg_effective_bytes_per_token", model.json_emit.i32(report.avg_effective_bytes_per_token)) discard map.set(payload, "avg_block_remaps_per_sample", model.json_emit.i32(report.avg_block_remaps_per_sample)) discard map.set(payload, "avg_old_pages_streamed", model.json_emit.i32(report.avg_old_pages_streamed)) discard map.set(payload, "avg_raw_pages_streamed", model.json_emit.i32(report.avg_raw_pages_streamed)) discard map.set(payload, "avg_ttft_ms", model.json_emit.i32(report.avg_ttft_ms)) discard map.set(payload, "avg_latency_ms", model.json_emit.i32(report.avg_latency_ms)) discard map.set(payload, "avg_tokens_per_sec", model.json_emit.i32(report.avg_tokens_per_sec)) discard map.set(payload, "avg_steady_tokens_per_sec", model.json_emit.i32(report.avg_steady_tokens_per_sec)) return json.object(payload)
+}
+fn benchmark_json(report: bench.benchmark_runner.BenchmarkReport) -> str {
+    let payload = map.new() discard map.set(payload, "budget_label", json.str(report.budget_label)) discard map.set(payload, "hot_budget_pct", model.json_emit.i32(report.hot_budget_pct)) discard map.set(payload, "suite_size", model.json_emit.i32(report.suite_size)) discard map.set(payload, "full_kv", model.json_emit.raw(aggregate_json(report.full_kv))) discard map.set(payload, "paged_full_kv", model.json_emit.raw(aggregate_json(report.paged_full_kv))) discard map.set(payload, "recent_only", model.json_emit.raw(aggregate_json(report.recent_only))) discard map.set(payload, "quantized_old_kv", model.json_emit.raw(aggregate_json(report.quantized_old_kv))) discard map.set(payload, "fidelity_paged_kv", model.json_emit.raw(aggregate_json(report.fidelity_paged_kv))) return json.object(payload)
+}
+fn budget_reports_jsonl_from_wire(budget_reports_wire: str) -> str {
+    let total = bench.benchmark_runner.collection_count(budget_reports_wire)
+    let mut out = ""
+    let mut idx = 0
+    while idx < total {
+        let report_wire = bench.benchmark_runner.collection_item_at(budget_reports_wire, idx)
+        out = str.concat(out, bench.benchmark_runner.benchmark_report_json_from_wire_direct(report_wire))
+        if idx + 1 < total {
+            out = str.concat(out, "\n")
+        }
+        idx = idx + 1
+    }
+    return out
+}
+fn rows_jsonl_from_wire(rows_wire: str) -> str {
+    let total = bench.benchmark_runner.collection_count(rows_wire)
+    let mut out = ""
+    let mut idx = 0
+    while idx < total {
+        let row_wire = bench.benchmark_runner.collection_item_at(rows_wire, idx)
+        out = str.concat(out, bench.benchmark_runner.row_json_from_wire(row_wire))
+        if idx + 1 < total {
+            out = str.concat(out, "\n")
+        }
+        idx = idx + 1
+    }
+    return out
+}
+fn row_str(raw: str, position: i32) -> str {
+    return benchmark_runner.frame_value_at(raw, position)
+}
+fn row_i32(raw: str, position: i32) -> i32 {
+    return benchmark_runner.parse_decimal(row_str(raw, position))
+}
+fn row_json_from_wire(raw: str) -> str {
+    return str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat("{\"budget_label\":", json.str(row_str(raw, 0))), str.concat(",\"hot_budget_pct\":", str.from_i32(row_i32(raw, 1)))), str.concat(",\"sample_id\":", json.str(row_str(raw, 2)))), str.concat(",\"category\":", json.str(row_str(raw, 3)))), str.concat(",\"policy_name\":", json.str(row_str(raw, 4)))), str.concat(",\"prompt_text\":", json.str(row_str(raw, 5)))), str.concat(",\"target_hint\":", json.str(row_str(raw, 6)))), str.concat(",\"prompt_token_count\":", str.from_i32(row_i32(raw, 7)))), str.concat(",\"generated_tokens\":", str.from_i32(row_i32(raw, 8)))), str.concat(",\"generated_text\":", json.str(row_str(raw, 9)))), str.concat(",\"generated_token_ids_wire\":", json.str(row_str(raw, 10)))), str.concat(",\"baseline_generated_text\":", json.str(row_str(raw, 11)))), str.concat(",\"baseline_generated_token_ids_wire\":", json.str(row_str(raw, 12)))), str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(",\"exact_match\":", str.from_i32(row_i32(raw, 13))), str.concat(",\"contains_target\":", str.from_i32(row_i32(raw, 14)))), str.concat(",\"matching_tokens\":", str.from_i32(row_i32(raw, 15)))), str.concat(",\"total_tokens\":", str.from_i32(row_i32(raw, 16)))), str.concat(",\"top1_agreement_pct\":", str.from_i32(row_i32(raw, 17)))), str.concat(",\"edit_distance\":", str.from_i32(row_i32(raw, 18))))), str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(",\"effective_bytes_total\":", str.from_i32(row_i32(raw, 19))), str.concat(",\"block_remap_count_total\":", str.from_i32(row_i32(raw, 20)))), str.concat(",\"copy_on_write_count_total\":", str.from_i32(row_i32(raw, 21)))), str.concat(",\"old_pages_streamed_total\":", str.from_i32(row_i32(raw, 22)))), str.concat(",\"raw_pages_streamed_total\":", str.from_i32(row_i32(raw, 23)))), str.concat(str.concat(",\"parity_match\":", str.from_i32(row_i32(raw, 24))), "}"))), "")
+}
+fn rows_jsonl_direct(rows_wire: str) -> str {
+    let mut out = "" let mut idx = 0 while idx < bench.benchmark_runner.collection_count(rows_wire) {
+        out = str.concat(out, row_json_from_wire(bench.benchmark_runner.collection_item_at(rows_wire, idx))) if idx + 1 < bench.benchmark_runner.collection_count(rows_wire) {
+            out = str.concat(out, "\n")
+        }
+        idx = idx + 1
+    }
+    return out
+}
+fn benchmark_matrix_json(artifacts: bench.benchmark_runner.BenchmarkMatrixArtifacts) -> str {
+    let mut rows = "" let mut idx = 0 while idx < bench.benchmark_runner.collection_count(artifacts.budget_reports_wire) {
+        if idx > 0 {
+            rows = str.concat(rows, ",")
+        }
+        rows = str.concat(rows, benchmark_json(bench.benchmark_runner.benchmark_report_from_wire(bench.benchmark_runner.collection_item_at(artifacts.budget_reports_wire, idx)))) idx = idx + 1
+    }
+    let mut out = "{\"budget_count\":"
+    out = str.concat(out, str.from_i32(artifacts.budget_count))
+    out = str.concat(out, ",\"budgets\":[")
+    out = str.concat(out, rows)
+    out = str.concat(out, "]}")
+    return out
+}
+fn benchmark_matrix_json_from_wire(budget_reports_wire: str) -> str {
+    let total = bench.benchmark_runner.collection_count(budget_reports_wire)
+    let mut rows = ""
+    let mut idx = 0
+    while idx < total {
+        let report_wire = bench.benchmark_runner.collection_item_at(budget_reports_wire, idx)
+        if idx > 0 {
+            rows = str.concat(rows, ",")
+        }
+        rows = str.concat(rows, bench.benchmark_runner.benchmark_report_json_from_wire_direct(report_wire))
+        idx = idx + 1
+    }
+    let mut out = "{\"budget_count\":"
+    out = str.concat(out, str.from_i32(total))
+    out = str.concat(out, ",\"budgets\":[")
+    out = str.concat(out, rows)
+    out = str.concat(out, "]}")
+    return out
+}
+fn benchmark_matrix_json_from_jsonl(budget_reports_jsonl: str) -> str {
+    let mut rows = "" let mut idx = 0 let budget_count = bench.stress_suite.count(budget_reports_jsonl) while idx < budget_count {
+        if idx > 0 {
+            rows = str.concat(rows, ",")
+        }
+        rows = str.concat(rows, bench.stress_suite.item_at(budget_reports_jsonl, idx)) idx = idx + 1
+    }
+    return str.concat(str.concat(str.concat("{\"budget_count\":", str.from_i32(budget_count)), ",\"budgets\":["), str.concat(rows, "]}"))
+}
+fn sanitize_csv(text: str) -> str {
+    let mut out = "" let mut idx = 0 while idx < str.len(text) {
+        let ch = str.slice(text, idx, idx + 1) if ch == "," || ch == "\n" || ch == "\r" {
+            out = str.concat(out, " ")
+        } else if ch == "\"" {
+            out = str.concat(out, "'")
+        } else {
+            out = str.concat(out, ch)
+        }
+        idx = idx + 1
+    }
+    return out
+}
+fn aggregate_csv_row(report: bench.benchmark_runner.BenchmarkReport, aggregate: bench.benchmark_runner.PolicyAggregate) -> str {
+    let mut out = "" out = str.concat(out, sanitize_csv(report.budget_label)) out = str.concat(out, ",") out = str.concat(out, str.from_i32(report.hot_budget_pct)) out = str.concat(out, ",") out = str.concat(out, sanitize_csv(aggregate.policy_name)) out = str.concat(out, ",") out = str.concat(out, str.from_i32(aggregate.sample_count)) out = str.concat(out, ",") out = str.concat(out, str.from_i32(aggregate.exact_match_count)) out = str.concat(out, ",") out = str.concat(out, str.from_i32(aggregate.contains_target_count)) out = str.concat(out, ",") out = str.concat(out, str.from_i32(aggregate.matching_tokens)) out = str.concat(out, ",") out = str.concat(out, str.from_i32(aggregate.total_tokens)) out = str.concat(out, ",") out = str.concat(out, str.from_i32(aggregate.top1_agreement_pct)) out = str.concat(out, ",") out = str.concat(out, str.from_i32(aggregate.avg_effective_bytes_per_token)) out = str.concat(out, ",") out = str.concat(out, str.from_i32(aggregate.avg_block_remaps_per_sample)) out = str.concat(out, ",") out = str.concat(out, str.from_i32(aggregate.avg_old_pages_streamed)) out = str.concat(out, ",") out = str.concat(out, str.from_i32(aggregate.avg_raw_pages_streamed)) out = str.concat(out, ",") out = str.concat(out, str.from_i32(aggregate.avg_ttft_ms)) out = str.concat(out, ",") out = str.concat(out, str.from_i32(aggregate.avg_latency_ms)) out = str.concat(out, ",") out = str.concat(out, str.from_i32(aggregate.avg_tokens_per_sec)) out = str.concat(out, ",") out = str.concat(out, str.from_i32(aggregate.avg_steady_tokens_per_sec)) return out
+}
+fn aggregate_wire_str(raw: str, position: i32) -> str {
+    return benchmark_runner.frame_value_at(raw, position)
+}
+fn aggregate_wire_i32(raw: str, position: i32) -> i32 {
+    return benchmark_runner.parse_decimal(aggregate_wire_str(raw, position))
+}
+fn report_wire_str(raw: str, position: i32) -> str {
+    return benchmark_runner.frame_value_at(raw, position)
+}
+fn report_wire_i32(raw: str, position: i32) -> i32 {
+    return benchmark_runner.parse_decimal(report_wire_str(raw, position))
+}
+fn aggregate_csv_row_from_wire(budget_label: str, hot_budget_pct: i32, aggregate_wire: str) -> str {
+    let mut out = ""
+    out = str.concat(out, sanitize_csv(budget_label))
+    out = str.concat(out, ",")
+    out = str.concat(out, str.from_i32(hot_budget_pct))
+    out = str.concat(out, ",")
+    out = str.concat(out, sanitize_csv(aggregate_wire_str(aggregate_wire, 0)))
+    out = str.concat(out, ",")
+    out = str.concat(out, str.from_i32(aggregate_wire_i32(aggregate_wire, 1)))
+    out = str.concat(out, ",")
+    out = str.concat(out, str.from_i32(aggregate_wire_i32(aggregate_wire, 2)))
+    out = str.concat(out, ",")
+    out = str.concat(out, str.from_i32(aggregate_wire_i32(aggregate_wire, 3)))
+    out = str.concat(out, ",")
+    out = str.concat(out, str.from_i32(aggregate_wire_i32(aggregate_wire, 4)))
+    out = str.concat(out, ",")
+    out = str.concat(out, str.from_i32(aggregate_wire_i32(aggregate_wire, 5)))
+    out = str.concat(out, ",")
+    out = str.concat(out, str.from_i32(aggregate_wire_i32(aggregate_wire, 6)))
+    out = str.concat(out, ",")
+    out = str.concat(out, str.from_i32(aggregate_wire_i32(aggregate_wire, 7)))
+    out = str.concat(out, ",")
+    out = str.concat(out, str.from_i32(aggregate_wire_i32(aggregate_wire, 8)))
+    out = str.concat(out, ",")
+    out = str.concat(out, str.from_i32(aggregate_wire_i32(aggregate_wire, 9)))
+    out = str.concat(out, ",")
+    out = str.concat(out, str.from_i32(aggregate_wire_i32(aggregate_wire, 10)))
+    out = str.concat(out, ",")
+    out = str.concat(out, str.from_i32(aggregate_wire_i32(aggregate_wire, 11)))
+    out = str.concat(out, ",")
+    out = str.concat(out, str.from_i32(aggregate_wire_i32(aggregate_wire, 12)))
+    out = str.concat(out, ",")
+    out = str.concat(out, str.from_i32(aggregate_wire_i32(aggregate_wire, 13)))
+    out = str.concat(out, ",")
+    out = str.concat(out, str.from_i32(aggregate_wire_i32(aggregate_wire, 14)))
+    return out
+}
+fn markdown_policy_row_from_wire(report_wire: str, aggregate_wire: str, failure_rows_wire: str) -> str {
+    return str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat("| ", report_wire_str(report_wire, 0)), str.concat(" | ", aggregate_wire_str(aggregate_wire, 0))), str.concat(" | ", str.from_i32(aggregate_wire_i32(aggregate_wire, 1)))), str.concat(" | ", str.from_i32(aggregate_wire_i32(aggregate_wire, 6)))), str.concat(" | ", str.from_i32(aggregate_wire_i32(aggregate_wire, 7)))), str.concat(" | ", str.from_i32(aggregate_wire_i32(aggregate_wire, 8)))), str.concat(str.concat(" | ", str.from_i32(failure_count_by_budget_and_policy_direct(failure_rows_wire, report_wire_str(report_wire, 0), aggregate_wire_str(aggregate_wire, 0)))), " |\n"))
+}
+fn policy_results_row_from_wire(report_wire: str, aggregate_wire: str, failure_rows_wire: str) -> str {
+    return str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat("| ", report_wire_str(report_wire, 0)), str.concat(" | ", aggregate_wire_str(aggregate_wire, 0))), str.concat(" | ", str.from_i32(aggregate_wire_i32(aggregate_wire, 1)))), str.concat(" | ", str.from_i32(aggregate_wire_i32(aggregate_wire, 6)))), str.concat(" | ", str.from_i32(aggregate_wire_i32(aggregate_wire, 7)))), str.concat(" | ", str.from_i32(aggregate_wire_i32(aggregate_wire, 8)))), str.concat(" | ", str.from_i32(aggregate_wire_i32(aggregate_wire, 9)))), str.concat(str.concat(" | ", str.from_i32(failure_count_by_budget_and_policy_direct(failure_rows_wire, report_wire_str(report_wire, 0), aggregate_wire_str(aggregate_wire, 0)))), " |\n"))
+}
+fn summary_csv(report: bench.benchmark_runner.BenchmarkReport) -> str {
+    let header = "budget_label,hot_budget_pct,policy,sample_count,exact_match_count,contains_target_count,matching_tokens,total_tokens,top1_agreement_pct,avg_effective_bytes_per_token,avg_block_remaps_per_sample,avg_old_pages_streamed,avg_raw_pages_streamed,avg_ttft_ms,avg_latency_ms,avg_tokens_per_sec,avg_steady_tokens_per_sec" return str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(header, "\n"), aggregate_csv_row(report, report.full_kv)), str.concat("\n", aggregate_csv_row(report, report.paged_full_kv))), str.concat("\n", aggregate_csv_row(report, report.recent_only))), str.concat("\n", aggregate_csv_row(report, report.quantized_old_kv))), str.concat("\n", aggregate_csv_row(report, report.fidelity_paged_kv))), "\n")
+}
+fn matrix_summary_csv(artifacts: bench.benchmark_runner.BenchmarkMatrixArtifacts) -> str {
+    let header = "budget_label,hot_budget_pct,policy,sample_count,exact_match_count,contains_target_count,matching_tokens,total_tokens,top1_agreement_pct,avg_effective_bytes_per_token,avg_block_remaps_per_sample,avg_old_pages_streamed,avg_raw_pages_streamed,avg_ttft_ms,avg_latency_ms,avg_tokens_per_sec,avg_steady_tokens_per_sec" let mut out = str.concat(header, "\n") let mut idx = 0 while idx < bench.benchmark_runner.collection_count(artifacts.budget_reports_wire) {
+        let budget_report = bench.benchmark_runner.benchmark_report_from_wire(bench.benchmark_runner.collection_item_at(artifacts.budget_reports_wire, idx)) out = str.concat(out, aggregate_csv_row(budget_report, budget_report.full_kv)) out = str.concat(out, "\n") out = str.concat(out, aggregate_csv_row(budget_report, budget_report.paged_full_kv)) out = str.concat(out, "\n") out = str.concat(out, aggregate_csv_row(budget_report, budget_report.recent_only)) out = str.concat(out, "\n") out = str.concat(out, aggregate_csv_row(budget_report, budget_report.quantized_old_kv)) out = str.concat(out, "\n") out = str.concat(out, aggregate_csv_row(budget_report, budget_report.fidelity_paged_kv)) out = str.concat(out, "\n") idx = idx + 1
+    }
+    return out
+}
+fn matrix_summary_csv_from_wire(budget_reports_wire: str) -> str {
+    let header = "budget_label,hot_budget_pct,policy,sample_count,exact_match_count,contains_target_count,matching_tokens,total_tokens,top1_agreement_pct,avg_effective_bytes_per_token,avg_block_remaps_per_sample,avg_old_pages_streamed,avg_raw_pages_streamed,avg_ttft_ms,avg_latency_ms,avg_tokens_per_sec,avg_steady_tokens_per_sec" let mut out = str.concat(header, "\n") let mut idx = 0 while idx < bench.benchmark_runner.collection_count(budget_reports_wire) {
+        let report_wire = bench.benchmark_runner.collection_item_at(budget_reports_wire, idx) let budget_label = bench.benchmark_runner.frame_value_at(report_wire, 0) let hot_budget_pct = bench.benchmark_runner.parse_decimal(bench.benchmark_runner.frame_value_at(report_wire, 1)) out = str.concat(out, aggregate_csv_row_from_wire(budget_label, hot_budget_pct, bench.benchmark_runner.frame_value_at(report_wire, 3))) out = str.concat(out, "\n") out = str.concat(out, aggregate_csv_row_from_wire(budget_label, hot_budget_pct, bench.benchmark_runner.frame_value_at(report_wire, 4))) out = str.concat(out, "\n") out = str.concat(out, aggregate_csv_row_from_wire(budget_label, hot_budget_pct, bench.benchmark_runner.frame_value_at(report_wire, 5))) out = str.concat(out, "\n") out = str.concat(out, aggregate_csv_row_from_wire(budget_label, hot_budget_pct, bench.benchmark_runner.frame_value_at(report_wire, 6))) out = str.concat(out, "\n") out = str.concat(out, aggregate_csv_row_from_wire(budget_label, hot_budget_pct, bench.benchmark_runner.frame_value_at(report_wire, 7))) out = str.concat(out, "\n") idx = idx + 1
+    }
+    return out
+}
+fn sample_csv_header() -> str {
+    return "budget_label,hot_budget_pct,sample_id,category,policy_name,prompt_token_count,generated_tokens,exact_match,contains_target,matching_tokens,total_tokens,top1_agreement_pct,edit_distance,effective_bytes_total,block_remap_count_total,copy_on_write_count_total,old_pages_streamed_total,raw_pages_streamed_total,parity_match,target_hint,generated_text"
+}
+fn sample_csv_row(row: bench.benchmark_runner.SampleRow) -> str {
+    let mut out = "" out = str.concat(out, sanitize_csv(row.budget_label)) out = str.concat(out, ",") out = str.concat(out, str.from_i32(row.hot_budget_pct)) out = str.concat(out, ",") out = str.concat(out, sanitize_csv(row.sample_id)) out = str.concat(out, ",") out = str.concat(out, sanitize_csv(row.category)) out = str.concat(out, ",") out = str.concat(out, sanitize_csv(row.policy_name)) out = str.concat(out, ",") out = str.concat(out, str.from_i32(row.prompt_token_count)) out = str.concat(out, ",") out = str.concat(out, str.from_i32(row.generated_tokens)) out = str.concat(out, ",") out = str.concat(out, str.from_i32(row.exact_match)) out = str.concat(out, ",") out = str.concat(out, str.from_i32(row.contains_target)) out = str.concat(out, ",") out = str.concat(out, str.from_i32(row.matching_tokens)) out = str.concat(out, ",") out = str.concat(out, str.from_i32(row.total_tokens)) out = str.concat(out, ",") out = str.concat(out, str.from_i32(row.top1_agreement_pct)) out = str.concat(out, ",") out = str.concat(out, str.from_i32(row.edit_distance)) out = str.concat(out, ",") out = str.concat(out, str.from_i32(row.effective_bytes_total)) out = str.concat(out, ",") out = str.concat(out, str.from_i32(row.block_remap_count_total)) out = str.concat(out, ",") out = str.concat(out, str.from_i32(row.copy_on_write_count_total)) out = str.concat(out, ",") out = str.concat(out, str.from_i32(row.old_pages_streamed_total)) out = str.concat(out, ",") out = str.concat(out, str.from_i32(row.raw_pages_streamed_total)) out = str.concat(out, ",") out = str.concat(out, str.from_i32(row.parity_match)) out = str.concat(out, ",") out = str.concat(out, sanitize_csv(row.target_hint)) out = str.concat(out, ",") out = str.concat(out, sanitize_csv(row.generated_text)) return out
+}
+fn rows_csv(rows_wire: str) -> str {
+    let mut out = str.concat(sample_csv_header(), "\n") let mut idx = 0 while idx < bench.benchmark_runner.collection_count(rows_wire) {
+        let row = bench.benchmark_runner.sample_row_from_wire(bench.benchmark_runner.collection_item_at(rows_wire, idx)) out = str.concat(out, sample_csv_row(row)) out = str.concat(out, "\n") idx = idx + 1
+    }
+    return out
+}
+fn rows_csv_body(rows_wire: str) -> str {
+    let mut out = "" let mut idx = 0 while idx < bench.benchmark_runner.collection_count(rows_wire) {
+        let row = bench.benchmark_runner.sample_row_from_wire(bench.benchmark_runner.collection_item_at(rows_wire, idx)) out = str.concat(out, sample_csv_row(row)) out = str.concat(out, "\n") idx = idx + 1
+    }
+    return out
+}
+fn row_csv_from_wire(raw: str) -> str {
+    return str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(sanitize_csv(row_str(raw, 0)), ","), str.from_i32(row_i32(raw, 1))), str.concat(",", sanitize_csv(row_str(raw, 2)))), str.concat(",", sanitize_csv(row_str(raw, 3)))), str.concat(",", sanitize_csv(row_str(raw, 4)))), str.concat(",", str.from_i32(row_i32(raw, 7)))), str.concat(",", str.from_i32(row_i32(raw, 8)))), str.concat(",", str.from_i32(row_i32(raw, 13)))), str.concat(",", str.from_i32(row_i32(raw, 14)))), str.concat(",", str.from_i32(row_i32(raw, 15)))), str.concat(",", str.from_i32(row_i32(raw, 16)))), str.concat(",", str.from_i32(row_i32(raw, 17)))), str.concat(",", str.from_i32(row_i32(raw, 18)))), str.concat(",", str.from_i32(row_i32(raw, 19)))), str.concat(",", str.from_i32(row_i32(raw, 20)))), str.concat(",", str.from_i32(row_i32(raw, 21)))), str.concat(",", str.from_i32(row_i32(raw, 22)))), str.concat(",", str.from_i32(row_i32(raw, 23)))), str.concat(",", str.from_i32(row_i32(raw, 24)))), str.concat(str.concat(",", sanitize_csv(row_str(raw, 6))), str.concat(",", sanitize_csv(row_str(raw, 9)))))
+}
+fn rows_csv_direct(rows_wire: str) -> str {
+    let mut out = str.concat(sample_csv_header(), "\n") let mut idx = 0 while idx < bench.benchmark_runner.collection_count(rows_wire) {
+        out = str.concat(out, row_csv_from_wire(bench.benchmark_runner.collection_item_at(rows_wire, idx))) out = str.concat(out, "\n") idx = idx + 1
+    }
+    return out
+}
+fn rows_csv_body_direct(rows_wire: str) -> str {
+    let mut out = "" let mut idx = 0 while idx < bench.benchmark_runner.collection_count(rows_wire) {
+        out = str.concat(out, row_csv_from_wire(bench.benchmark_runner.collection_item_at(rows_wire, idx))) out = str.concat(out, "\n") idx = idx + 1
+    }
+    return out
+}
+fn append_text_block(out: str, block: str) -> str {
+    if block == "" {
+        return out
+    }
+    if out == "" {
+        return block
+    }
+    return str.concat(out, block)
+}
+fn failure_count_by_budget_and_policy(rows_wire: str, budget_label: str, policy_name: str) -> i32 {
+    let mut total = 0 let mut idx = 0 while idx < bench.benchmark_runner.collection_count(rows_wire) {
+        let row = bench.benchmark_runner.sample_row_from_wire(bench.benchmark_runner.collection_item_at(rows_wire, idx)) if row.budget_label == budget_label && row.policy_name == policy_name {
+            total = total + 1
+        }
+        idx = idx + 1
+    }
+    return total
+}
+fn failure_count_by_budget_and_policy_direct(rows_wire: str, budget_label: str, policy_name: str) -> i32 {
+    let mut total = 0 let mut idx = 0 while idx < bench.benchmark_runner.collection_count(rows_wire) {
+        let raw = bench.benchmark_runner.collection_item_at(rows_wire, idx) if row_str(raw, 0) == budget_label && row_str(raw, 4) == policy_name {
+            total = total + 1
+        }
+        idx = idx + 1
+    }
+    return total
+}
+fn markdown_policy_row(report: bench.benchmark_runner.BenchmarkReport, aggregate: bench.benchmark_runner.PolicyAggregate, failure_rows_wire: str) -> str {
+    return str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat("| ", report.budget_label), str.concat(" | ", aggregate.policy_name)), str.concat(" | ", str.from_i32(aggregate.sample_count))), str.concat(" | ", str.from_i32(aggregate.top1_agreement_pct))), str.concat(" | ", str.from_i32(aggregate.avg_effective_bytes_per_token))), str.concat(" | ", str.from_i32(aggregate.avg_block_remaps_per_sample))), str.concat(str.concat(" | ", str.from_i32(failure_count_by_budget_and_policy(failure_rows_wire, report.budget_label, aggregate.policy_name))), " |\n"))
+}
+fn markdown_matrix_report(model_dir: str, page_tokens: i32, artifacts: bench.benchmark_runner.BenchmarkMatrixArtifacts) -> str {
+    let mut rows = "" let mut suite_size = 0 let mut idx = 0 while idx < bench.benchmark_runner.collection_count(artifacts.budget_reports_wire) {
+        let budget_report = bench.benchmark_runner.benchmark_report_from_wire(bench.benchmark_runner.collection_item_at(artifacts.budget_reports_wire, idx)) if idx == 0 {
+            suite_size = budget_report.suite_size
+        }
+        rows = str.concat(rows, markdown_policy_row(budget_report, budget_report.full_kv, artifacts.failure_rows_wire)) rows = str.concat(rows, markdown_policy_row(budget_report, budget_report.paged_full_kv, artifacts.failure_rows_wire)) rows = str.concat(rows, markdown_policy_row(budget_report, budget_report.recent_only, artifacts.failure_rows_wire)) rows = str.concat(rows, markdown_policy_row(budget_report, budget_report.quantized_old_kv, artifacts.failure_rows_wire)) rows = str.concat(rows, markdown_policy_row(budget_report, budget_report.fidelity_paged_kv, artifacts.failure_rows_wire)) idx = idx + 1
+    }
+    return str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat("# TMH Benchmark Matrix\n\n", str.concat("Model dir: `", model_dir)), "`\n"), str.concat("Page tokens: `", str.concat(str.from_i32(page_tokens), "`\n"))), str.concat("Budget count: `", str.concat(str.from_i32(artifacts.budget_count), "`\n"))), str.concat("Suite size: `", str.concat(str.from_i32(suite_size), "`\n\n"))), "| Budget | Policy | Samples | Top1 % | Avg Effective Bytes/Token | Avg Remaps | Failure Rows |\n| --- | --- | ---: | ---: | ---: | ---: | ---: |\n"), str.concat(rows, "\nFailure rows are recorded in the JSONL and CSV artifacts for direct inspection.\n"))
+}
+fn markdown_matrix_report_from_wire(model_dir: str, page_tokens: i32, budget_reports_wire: str, failure_rows_wire: str) -> str {
+    let mut rows = "" let mut suite_size = 0 let mut idx = 0 while idx < bench.benchmark_runner.collection_count(budget_reports_wire) {
+        let report_wire = bench.benchmark_runner.collection_item_at(budget_reports_wire, idx) if idx == 0 {
+            suite_size = report_wire_i32(report_wire, 2)
+        }
+        rows = str.concat(rows, markdown_policy_row_from_wire(report_wire, report_wire_str(report_wire, 3), failure_rows_wire)) rows = str.concat(rows, markdown_policy_row_from_wire(report_wire, report_wire_str(report_wire, 4), failure_rows_wire)) rows = str.concat(rows, markdown_policy_row_from_wire(report_wire, report_wire_str(report_wire, 5), failure_rows_wire)) rows = str.concat(rows, markdown_policy_row_from_wire(report_wire, report_wire_str(report_wire, 6), failure_rows_wire)) rows = str.concat(rows, markdown_policy_row_from_wire(report_wire, report_wire_str(report_wire, 7), failure_rows_wire)) idx = idx + 1
+    }
+    return str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat("# TMH Benchmark Matrix\n\n", str.concat("Model dir: `", model_dir)), "`\n"), str.concat("Page tokens: `", str.concat(str.from_i32(page_tokens), "`\n"))), str.concat("Budget count: `", str.concat(str.from_i32(bench.benchmark_runner.collection_count(budget_reports_wire)), "`\n"))), str.concat("Suite size: `", str.concat(str.from_i32(suite_size), "`\n\n"))), "| Budget | Policy | Samples | Top1 % | Avg Effective Bytes/Token | Avg Remaps | Failure Rows |\n| --- | --- | ---: | ---: | ---: | ---: | ---: |\n"), str.concat(rows, "\nFailure rows are recorded in the JSONL and CSV artifacts for direct inspection.\n"))
+}
+fn markdown_policy_row_direct(report: bench.benchmark_runner.BenchmarkReport, aggregate: bench.benchmark_runner.PolicyAggregate, failure_rows_wire: str) -> str {
+    return str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat("| ", report.budget_label), str.concat(" | ", aggregate.policy_name)), str.concat(" | ", str.from_i32(aggregate.sample_count))), str.concat(" | ", str.from_i32(aggregate.top1_agreement_pct))), str.concat(" | ", str.from_i32(aggregate.avg_effective_bytes_per_token))), str.concat(" | ", str.from_i32(aggregate.avg_block_remaps_per_sample))), str.concat(str.concat(" | ", str.from_i32(failure_count_by_budget_and_policy_direct(failure_rows_wire, report.budget_label, aggregate.policy_name))), " |\n"))
+}
+fn manifest_json(manifest: ArtifactManifest) -> str {
+    let payload = map.new() discard map.set(payload, "summary_json_path", json.str(manifest.summary_json_path)) discard map.set(payload, "summary_csv_path", json.str(manifest.summary_csv_path)) discard map.set(payload, "budgets_jsonl_path", json.str(manifest.budgets_jsonl_path)) discard map.set(payload, "samples_jsonl_path", json.str(manifest.samples_jsonl_path)) discard map.set(payload, "samples_csv_path", json.str(manifest.samples_csv_path)) discard map.set(payload, "failures_jsonl_path", json.str(manifest.failures_jsonl_path)) discard map.set(payload, "failures_csv_path", json.str(manifest.failures_csv_path)) discard map.set(payload, "report_md_path", json.str(manifest.report_md_path)) discard map.set(payload, "budget_count", model.json_emit.i32(manifest.budget_count)) discard map.set(payload, "suite_size", model.json_emit.i32(manifest.suite_size)) discard map.set(payload, "sample_rows", model.json_emit.i32(manifest.sample_rows)) discard map.set(payload, "failure_rows", model.json_emit.i32(manifest.failure_rows)) return json.object(payload)
+}
+
+fn manifest_json_from_fields(summary_json_path: str, summary_csv_path: str, budgets_jsonl_path: str, samples_jsonl_path: str, samples_csv_path: str, failures_jsonl_path: str, failures_csv_path: str, report_md_path: str, budget_count: i32, suite_size: i32, sample_rows: i32, failure_rows: i32) -> str {
+    return str.concat(
+        str.concat(
+            str.concat(
+                str.concat(
+                    str.concat(
+                        str.concat(
+                            str.concat(
+                                str.concat(
+                                    str.concat(
+                                        str.concat(
+                                            str.concat(
+                                                str.concat(
+                                                    str.concat(
+                                                        str.concat(
+                                                            str.concat(
+                                                                str.concat(
+                                                                    str.concat(
+                                                                        str.concat(
+                                                                            str.concat(
+                                                                                str.concat(
+                                                                                    str.concat(
+                                                                                        "{\"summary_json_path\":",
+                                                                                        json.str(summary_json_path)
+                                                                                    ),
+                                                                                    str.concat(",\"summary_csv_path\":", json.str(summary_csv_path))
+                                                                                ),
+                                                                                str.concat(",\"budgets_jsonl_path\":", json.str(budgets_jsonl_path))
+                                                                            ),
+                                                                            str.concat(",\"samples_jsonl_path\":", json.str(samples_jsonl_path))
+                                                                        ),
+                                                                        str.concat(",\"samples_csv_path\":", json.str(samples_csv_path))
+                                                                    ),
+                                                                    str.concat(",\"failures_jsonl_path\":", json.str(failures_jsonl_path))
+                                                                ),
+                                                                str.concat(",\"failures_csv_path\":", json.str(failures_csv_path))
+                                                            ),
+                                                            str.concat(",\"report_md_path\":", json.str(report_md_path))
+                                                        ),
+                                                        str.concat(",\"budget_count\":", str.from_i32(budget_count))
+                                                    ),
+                                                    str.concat(",\"suite_size\":", str.from_i32(suite_size))
+                                                ),
+                                                str.concat(",\"sample_rows\":", str.from_i32(sample_rows))
+                                            ),
+                                            str.concat(",\"failure_rows\":", str.from_i32(failure_rows))
+                                        ),
+                                        "}"
+                                    ),
+                                    ""
+                                ),
+                                ""
+                            ),
+                            ""
+                        ),
+                        ""
+                    ),
+                    ""
+                ),
+                ""
+            ),
+            ""
+        ),
+        ""
+    )
+}
+fn hardware_label() -> str {
+    let configured = env.get("FPA_HARDWARE") if configured != "" {
+        return configured
+    }
+    return "Apple Silicon unified-memory host"
+}
+fn matrix_prefix(model_dir: str) -> str {
+    return str.concat("fpa_bench_", str.concat(model.artifacts.model_id_from_dir(model_dir), "_matrix"))
+}
+fn matrix_summary_json_path(model_dir: str) -> str {
+    return str.concat("artifacts/", str.concat(matrix_prefix(model_dir), "_summary.json"))
+}
+fn matrix_summary_csv_path(model_dir: str) -> str {
+    return str.concat("artifacts/", str.concat(matrix_prefix(model_dir), "_summary.csv"))
+}
+fn matrix_budgets_jsonl_path(model_dir: str) -> str {
+    return str.concat("artifacts/", str.concat(matrix_prefix(model_dir), "_budgets.jsonl"))
+}
+fn matrix_samples_jsonl_path(model_dir: str) -> str {
+    return str.concat("artifacts/", str.concat(matrix_prefix(model_dir), "_samples.jsonl"))
+}
+fn matrix_samples_csv_path(model_dir: str) -> str {
+    return str.concat("artifacts/", str.concat(matrix_prefix(model_dir), "_samples.csv"))
+}
+fn matrix_failures_jsonl_path(model_dir: str) -> str {
+    return str.concat("artifacts/", str.concat(matrix_prefix(model_dir), "_failures.jsonl"))
+}
+fn matrix_failures_csv_path(model_dir: str) -> str {
+    return str.concat("artifacts/", str.concat(matrix_prefix(model_dir), "_failures.csv"))
+}
+fn matrix_report_md_path(model_dir: str) -> str {
+    return str.concat("artifacts/", str.concat(matrix_prefix(model_dir), "_report.md"))
+}
+fn append_failure_examples_text(out: str, failure_rows_wire: str, limit: i32, seen: i32) -> str {
+    let mut next = out let mut idx = 0 let mut emitted = seen while idx < bench.benchmark_runner.collection_count(failure_rows_wire) && emitted < limit {
+        let row = bench.benchmark_runner.collection_item_at(failure_rows_wire, idx) next = str.concat(next, str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat("- `", row_str(row, 0)), "/"), row_str(row, 4)), str.concat("/", row_str(row, 2))), "` top1="), str.from_i32(row_i32(row, 17))), str.concat("% parity=", str.concat(str.from_i32(row_i32(row, 24)), str.concat(" target=", str.concat(json.str(row_str(row, 6)), "\n")))))) idx = idx + 1 emitted = emitted + 1
+    }
+    return next
+}
+fn write_artifacts(model_dir: str, page_tokens: i32, hot_budget_pct: i32, artifacts: bench.benchmark_runner.BenchmarkArtifacts) -> ArtifactManifest {
+    discard fs.mkdir("artifacts") let prefix = str.concat(str.concat("fpa_bench_", model.artifacts.model_id_from_dir(model_dir)), str.concat("_hot", str.from_i32(hot_budget_pct))) let summary_json_path = path.join("artifacts", str.concat(prefix, ".summary.json")) let summary_csv_path = path.join("artifacts", str.concat(prefix, ".summary.csv")) let budgets_jsonl_path = path.join("artifacts", str.concat(prefix, ".budgets.jsonl")) let samples_jsonl_path = path.join("artifacts", str.concat(prefix, ".samples.jsonl")) let samples_csv_path = path.join("artifacts", str.concat(prefix, ".samples.csv")) let failures_jsonl_path = path.join("artifacts", str.concat(prefix, ".failures.jsonl")) let failures_csv_path = path.join("artifacts", str.concat(prefix, ".failures.csv")) let report_md_path = path.join("artifacts", str.concat(prefix, ".report.md")) discard fs.write_file(summary_json_path, benchmark_json(artifacts.report)) discard fs.write_file(summary_csv_path, summary_csv(artifacts.report)) discard fs.write_file(budgets_jsonl_path, benchmark_json(artifacts.report)) discard fs.write_file(samples_jsonl_path, rows_jsonl_from_wire(artifacts.sample_rows_wire)) discard fs.write_file(samples_csv_path, rows_csv(artifacts.sample_rows_wire)) discard fs.write_file(failures_jsonl_path, rows_jsonl_from_wire(artifacts.failure_rows_wire)) discard fs.write_file(failures_csv_path, rows_csv(artifacts.failure_rows_wire)) let matrix_artifacts = bench.benchmark_runner.matrix_artifacts_from_budget(artifacts) discard fs.write_file(report_md_path, markdown_matrix_report(model_dir, page_tokens, matrix_artifacts)) return ArtifactManifest {
+        summary_json_path: summary_json_path, summary_csv_path: summary_csv_path, budgets_jsonl_path: budgets_jsonl_path, samples_jsonl_path: samples_jsonl_path, samples_csv_path: samples_csv_path, failures_jsonl_path: failures_jsonl_path, failures_csv_path: failures_csv_path, report_md_path: report_md_path, budget_count: 1, suite_size: artifacts.report.suite_size, sample_rows: bench.benchmark_runner.collection_count(artifacts.sample_rows_wire), failure_rows: bench.benchmark_runner.collection_count(artifacts.failure_rows_wire),
+    }
+}
+fn write_matrix_artifacts(model_dir: str, page_tokens: i32, artifacts: bench.benchmark_runner.BenchmarkMatrixArtifacts) -> ArtifactManifest {
+    discard fs.mkdir("artifacts") let prefix = str.concat("fpa_bench_", str.concat(model.artifacts.model_id_from_dir(model_dir), "_matrix")) let summary_json_path = path.join("artifacts", str.concat(prefix, ".summary.json")) let summary_csv_path = path.join("artifacts", str.concat(prefix, ".summary.csv")) let budgets_jsonl_path = path.join("artifacts", str.concat(prefix, ".budgets.jsonl")) let samples_jsonl_path = path.join("artifacts", str.concat(prefix, ".samples.jsonl")) let samples_csv_path = path.join("artifacts", str.concat(prefix, ".samples.csv")) let failures_jsonl_path = path.join("artifacts", str.concat(prefix, ".failures.jsonl")) let failures_csv_path = path.join("artifacts", str.concat(prefix, ".failures.csv")) let report_md_path = path.join("artifacts", str.concat(prefix, ".report.md")) let suite_size = if bench.benchmark_runner.collection_count(artifacts.budget_reports_wire) <= 0 {
+        0
+    } else {
+        bench.benchmark_runner.parse_decimal(bench.benchmark_runner.frame_value_at(bench.benchmark_runner.collection_item_at(artifacts.budget_reports_wire, 0), 2))
+    }
+    discard fs.write_file(summary_json_path, benchmark_matrix_json_from_wire(artifacts.budget_reports_wire)) discard fs.write_file(summary_csv_path, matrix_summary_csv_from_wire(artifacts.budget_reports_wire)) discard fs.write_file(budgets_jsonl_path, budget_reports_jsonl_from_wire(artifacts.budget_reports_wire)) discard fs.write_file(samples_jsonl_path, rows_jsonl_from_wire(artifacts.sample_rows_wire)) discard fs.write_file(samples_csv_path, rows_csv(artifacts.sample_rows_wire)) discard fs.write_file(failures_jsonl_path, rows_jsonl_from_wire(artifacts.failure_rows_wire)) discard fs.write_file(failures_csv_path, rows_csv(artifacts.failure_rows_wire)) discard fs.write_file(report_md_path, markdown_matrix_report_from_wire(model_dir, page_tokens, artifacts.budget_reports_wire, artifacts.failure_rows_wire)) return ArtifactManifest {
+        summary_json_path: summary_json_path, summary_csv_path: summary_csv_path, budgets_jsonl_path: budgets_jsonl_path, samples_jsonl_path: samples_jsonl_path, samples_csv_path: samples_csv_path, failures_jsonl_path: failures_jsonl_path, failures_csv_path: failures_csv_path, report_md_path: report_md_path, budget_count: artifacts.budget_count, suite_size: suite_size, sample_rows: bench.benchmark_runner.collection_count(artifacts.sample_rows_wire), failure_rows: bench.benchmark_runner.collection_count(artifacts.failure_rows_wire),
+    }
+}
+fn write_matrix_artifacts_from_wire(model_dir: str, page_tokens: i32, budget_reports_wire: str, sample_rows_wire: str, failure_rows_wire: str) -> ArtifactManifest {
+    discard fs.mkdir("artifacts") let summary_json_path = matrix_summary_json_path(model_dir) let summary_csv_path = matrix_summary_csv_path(model_dir) let budgets_jsonl_path = matrix_budgets_jsonl_path(model_dir) let samples_jsonl_path = matrix_samples_jsonl_path(model_dir) let samples_csv_path = matrix_samples_csv_path(model_dir) let failures_jsonl_path = matrix_failures_jsonl_path(model_dir) let failures_csv_path = matrix_failures_csv_path(model_dir) let report_md_path = matrix_report_md_path(model_dir) let suite_size = if bench.benchmark_runner.collection_count(budget_reports_wire) <= 0 {
+        0
+    } else {
+        bench.benchmark_runner.benchmark_report_from_wire(bench.benchmark_runner.collection_item_at(budget_reports_wire, 0)).suite_size
+    }
+    discard fs.write_file(summary_json_path, benchmark_matrix_json_from_wire(budget_reports_wire)) discard fs.write_file(summary_csv_path, matrix_summary_csv_from_wire(budget_reports_wire)) discard fs.write_file(budgets_jsonl_path, budget_reports_jsonl_from_wire(budget_reports_wire)) discard fs.write_file(samples_jsonl_path, rows_jsonl_from_wire(sample_rows_wire)) discard fs.write_file(samples_csv_path, rows_csv(sample_rows_wire)) discard fs.write_file(failures_jsonl_path, rows_jsonl_from_wire(failure_rows_wire)) discard fs.write_file(failures_csv_path, rows_csv(failure_rows_wire)) discard fs.write_file(report_md_path, markdown_matrix_report_from_wire(model_dir, page_tokens, budget_reports_wire, failure_rows_wire)) return ArtifactManifest {
+        summary_json_path: summary_json_path, summary_csv_path: summary_csv_path, budgets_jsonl_path: budgets_jsonl_path, samples_jsonl_path: samples_jsonl_path, samples_csv_path: samples_csv_path, failures_jsonl_path: failures_jsonl_path, failures_csv_path: failures_csv_path, report_md_path: report_md_path, budget_count: bench.benchmark_runner.collection_count(budget_reports_wire), suite_size: suite_size, sample_rows: bench.benchmark_runner.collection_count(sample_rows_wire), failure_rows: bench.benchmark_runner.collection_count(failure_rows_wire),
+    }
+}
+fn results_md_from_wire_text_fields(model_dir: str, page_tokens: i32, budget_reports_wire: str, failure_rows_wire: str, summary_json_path: str, summary_csv_path: str, budgets_jsonl_path: str, samples_jsonl_path: str, samples_csv_path: str, failures_jsonl_path: str, failures_csv_path: str, report_md_path: str, budget_count: i32) -> str {
+    let model_id = model.artifacts.model_id_from_dir(model_dir) let bench_limit = env.get("FPA_BENCH_LIMIT") let suite_size = if bench.benchmark_runner.collection_count(budget_reports_wire) <= 0 {
+        0
+    } else {
+        report_wire_i32(bench.benchmark_runner.collection_item_at(budget_reports_wire, 0), 2)
+    }
+    let mut rows = "" let mut notes = "" let mut idx = 0 while idx < bench.benchmark_runner.collection_count(budget_reports_wire) {
+        let report_wire = bench.benchmark_runner.collection_item_at(budget_reports_wire, idx) let full_wire = report_wire_str(report_wire, 3) let paged_wire = report_wire_str(report_wire, 4) let recent_wire = report_wire_str(report_wire, 5) let quant_wire = report_wire_str(report_wire, 6) let fidelity_wire = report_wire_str(report_wire, 7) rows = str.concat(rows, policy_results_row_from_wire(report_wire, full_wire, failure_rows_wire)) rows = str.concat(rows, policy_results_row_from_wire(report_wire, paged_wire, failure_rows_wire)) rows = str.concat(rows, policy_results_row_from_wire(report_wire, recent_wire, failure_rows_wire)) rows = str.concat(rows, policy_results_row_from_wire(report_wire, quant_wire, failure_rows_wire)) rows = str.concat(rows, policy_results_row_from_wire(report_wire, fidelity_wire, failure_rows_wire)) if aggregate_wire_i32(fidelity_wire, 7) < aggregate_wire_i32(quant_wire, 7) {
+            notes = str.concat(notes, str.concat("- fidelity beats quantized_old_kv on effective bytes/token at budget `", str.concat(report_wire_str(report_wire, 0), "`\n")))
+        } else {
+            notes = str.concat(notes, str.concat("- fidelity does not beat quantized_old_kv on effective bytes/token at budget `", str.concat(report_wire_str(report_wire, 0), "`\n")))
+        }
+        if aggregate_wire_i32(recent_wire, 6) < aggregate_wire_i32(fidelity_wire, 6) {
+            notes = str.concat(notes, str.concat("- recent_only underperforms fidelity at budget `", str.concat(report_wire_str(report_wire, 0), "`\n")))
+        } else {
+            notes = str.concat(notes, str.concat("- recent_only does not clearly fail versus fidelity at budget `", str.concat(report_wire_str(report_wire, 0), "`\n")))
+        }
+        idx = idx + 1
+    }
+    let mut out = "" out = str.concat(out, "# RESULTS\n\n") out = str.concat(out, str.concat("Model: `", str.concat(model_id, "`\n"))) out = str.concat(out, str.concat("Model dir: `", str.concat(model_dir, "`\n"))) out = str.concat(out, str.concat("Hardware: `", str.concat(hardware_label(), "`\n"))) out = str.concat(out, str.concat("Page tokens: `", str.concat(str.from_i32(page_tokens), "`\n"))) out = str.concat(out, str.concat("Suite size: `", str.concat(str.from_i32(suite_size), "`\n"))) out = str.concat(out, str.concat("Budget count: `", str.concat(str.from_i32(budget_count), "`\n"))) out = str.concat(out, "Policies: `full_kv`, `paged_full_kv`, `recent_only`, `quantized_old_kv`, `fidelity_paged_kv`\n") out = str.concat(out, "Budgets: `50`, `25`, `12.5`, `6.25`, `0`\n") if bench_limit != "" {
+        out = str.concat(out, str.concat("Bench limit override: `", str.concat(bench_limit, "`\n")))
+    }
+    out = str.concat(out, "\n## Policy Matrix\n\n") out = str.concat(out, "| Budget | Policy | Samples | Top1 % | Avg Effective Bytes/Token | Avg Remaps | Avg Old Pages | Failure Rows |\n| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |\n") out = str.concat(out, rows) out = str.concat(out, "\n## Negative Results\n\n") out = str.concat(out, notes) out = str.concat(out, "\n## Failure Cases\n\n") out = append_results_failure_examples(out, failure_rows_wire, 12) out = str.concat(out, "\n## Artifact Paths\n\n") out = str.concat(out, str.concat("- summary.json: `", str.concat(summary_json_path, "`\n"))) out = str.concat(out, str.concat("- summary.csv: `", str.concat(summary_csv_path, "`\n"))) out = str.concat(out, str.concat("- budgets.jsonl: `", str.concat(budgets_jsonl_path, "`\n"))) out = str.concat(out, str.concat("- samples.jsonl: `", str.concat(samples_jsonl_path, "`\n"))) out = str.concat(out, str.concat("- samples.csv: `", str.concat(samples_csv_path, "`\n"))) out = str.concat(out, str.concat("- failures.jsonl: `", str.concat(failures_jsonl_path, "`\n"))) out = str.concat(out, str.concat("- failures.csv: `", str.concat(failures_csv_path, "`\n"))) out = str.concat(out, str.concat("- report.md: `", str.concat(report_md_path, "`\n"))) return out
+}
+fn results_md_from_wire_text(model_dir: str, page_tokens: i32, budget_reports_wire: str, failure_rows_wire: str, manifest: ArtifactManifest) -> str {
+    let model_id = model.artifacts.model_id_from_dir(model_dir) let bench_limit = env.get("FPA_BENCH_LIMIT") let suite_size = if bench.benchmark_runner.collection_count(budget_reports_wire) <= 0 {
+        0
+    } else {
+        bench.benchmark_runner.benchmark_report_from_wire(bench.benchmark_runner.collection_item_at(budget_reports_wire, 0)).suite_size
+    }
+    let mut rows = "" let mut notes = "" let mut idx = 0 while idx < bench.benchmark_runner.collection_count(budget_reports_wire) {
+        let report = bench.benchmark_runner.benchmark_report_from_wire(bench.benchmark_runner.collection_item_at(budget_reports_wire, idx)) rows = str.concat(rows, policy_results_row(report, report.full_kv, failure_rows_wire)) rows = str.concat(rows, policy_results_row(report, report.paged_full_kv, failure_rows_wire)) rows = str.concat(rows, policy_results_row(report, report.recent_only, failure_rows_wire)) rows = str.concat(rows, policy_results_row(report, report.quantized_old_kv, failure_rows_wire)) rows = str.concat(rows, policy_results_row(report, report.fidelity_paged_kv, failure_rows_wire)) if report.fidelity_paged_kv.avg_effective_bytes_per_token < report.quantized_old_kv.avg_effective_bytes_per_token {
+            notes = str.concat(notes, str.concat("- fidelity beats quantized_old_kv on effective bytes/token at budget `", str.concat(report.budget_label, "`\n")))
+        } else {
+            notes = str.concat(notes, str.concat("- fidelity does not beat quantized_old_kv on effective bytes/token at budget `", str.concat(report.budget_label, "`\n")))
+        }
+        if report.recent_only.top1_agreement_pct < report.fidelity_paged_kv.top1_agreement_pct {
+            notes = str.concat(notes, str.concat("- recent_only underperforms fidelity at budget `", str.concat(report.budget_label, "`\n")))
+        } else {
+            notes = str.concat(notes, str.concat("- recent_only does not clearly fail versus fidelity at budget `", str.concat(report.budget_label, "`\n")))
+        }
+        idx = idx + 1
+    }
+    let mut out = "" out = str.concat(out, "# RESULTS\n\n") out = str.concat(out, str.concat("Model: `", str.concat(model_id, "`\n"))) out = str.concat(out, str.concat("Model dir: `", str.concat(model_dir, "`\n"))) out = str.concat(out, str.concat("Hardware: `", str.concat(hardware_label(), "`\n"))) out = str.concat(out, str.concat("Page tokens: `", str.concat(str.from_i32(page_tokens), "`\n"))) out = str.concat(out, str.concat("Suite size: `", str.concat(str.from_i32(suite_size), "`\n"))) out = str.concat(out, str.concat("Budget count: `", str.concat(str.from_i32(bench.benchmark_runner.collection_count(budget_reports_wire)), "`\n"))) out = str.concat(out, "Policies: `full_kv`, `paged_full_kv`, `recent_only`, `quantized_old_kv`, `fidelity_paged_kv`\n") out = str.concat(out, "Budgets: `50`, `25`, `12.5`, `6.25`, `0`\n") if bench_limit != "" {
+        out = str.concat(out, str.concat("Bench limit override: `", str.concat(bench_limit, "`\n")))
+    }
+    out = str.concat(out, "\n## Policy Matrix\n\n") out = str.concat(out, "| Budget | Policy | Samples | Top1 % | Avg Effective Bytes/Token | Avg Remaps | Avg Old Pages | Failure Rows |\n| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |\n") out = str.concat(out, rows) out = str.concat(out, "\n## Negative Results\n\n") out = str.concat(out, notes) out = str.concat(out, "\n## Failure Cases\n\n") out = append_results_failure_examples(out, failure_rows_wire, 12) out = str.concat(out, "\n## Artifact Paths\n\n") out = str.concat(out, str.concat("- summary.json: `", str.concat(manifest.summary_json_path, "`\n"))) out = str.concat(out, str.concat("- summary.csv: `", str.concat(manifest.summary_csv_path, "`\n"))) out = str.concat(out, str.concat("- budgets.jsonl: `", str.concat(manifest.budgets_jsonl_path, "`\n"))) out = str.concat(out, str.concat("- samples.jsonl: `", str.concat(manifest.samples_jsonl_path, "`\n"))) out = str.concat(out, str.concat("- samples.csv: `", str.concat(manifest.samples_csv_path, "`\n"))) out = str.concat(out, str.concat("- failures.jsonl: `", str.concat(manifest.failures_jsonl_path, "`\n"))) out = str.concat(out, str.concat("- failures.csv: `", str.concat(manifest.failures_csv_path, "`\n"))) out = str.concat(out, str.concat("- report.md: `", str.concat(manifest.report_md_path, "`\n"))) return out
+}
+fn write_results_md_from_wire(model_dir: str, page_tokens: i32, budget_reports_wire: str, failure_rows_wire: str, manifest: ArtifactManifest) -> str {
+    let output_path = "RESULTS.md" discard fs.write_file(output_path, results_md_from_wire_text(model_dir, page_tokens, budget_reports_wire, failure_rows_wire, manifest)) return output_path
+}
+fn budget_prefix_path(budget_label: str) -> str {
+    return str.concat("artifacts/bench_budget_", bench.benchmark_runner.budget_safe_label(budget_label))
+}
+fn budget_report_wire_text(budget_label: str) -> str {
+    return fs.read_file(str.concat(budget_prefix_path(budget_label), "_report_wire.txt"))
+}
+fn budget_sample_rows_wire_text(budget_label: str) -> str {
+    return fs.read_file(str.concat(budget_prefix_path(budget_label), "_samples_wire.txt"))
+}
+fn budget_failure_rows_wire_text(budget_label: str) -> str {
+    return fs.read_file(str.concat(budget_prefix_path(budget_label), "_failures_wire.txt"))
+}
+fn run_bench_output_text(shape: model.EngineShape, model_dir: str, page_tokens: i32, hot_budget_pct: i32) -> str {
+    let bundle = bench.benchmark_runner.run_matrix_bundle(shape, model_dir, page_tokens, hot_budget_pct)
+    let budget_reports_wire = bench.benchmark_runner.matrix_budget_reports_wire(bundle)
+    let sample_rows_wire = bench.benchmark_runner.matrix_sample_rows_wire(bundle)
+    let failure_rows_wire = bench.benchmark_runner.matrix_failure_rows_wire(bundle)
+    let manifest_json = write_matrix_outputs_manifest_json_from_wire(model_dir, page_tokens, budget_reports_wire, sample_rows_wire, failure_rows_wire)
+    return str.concat(str.concat(str.concat("FPA_BENCH ", benchmark_matrix_json_from_wire(budget_reports_wire)), "\n"), str.concat(str.concat("FPA_BENCH_ARTIFACTS ", manifest_json), "\n"))
+}
+fn write_matrix_outputs_manifest_json_from_wire(model_dir: str, page_tokens: i32, budget_reports_wire: str, sample_rows_wire: str, failure_rows_wire: str) -> str {
+    discard fs.mkdir("artifacts")
+    let summary_json_path = matrix_summary_json_path(model_dir)
+    let summary_csv_path = matrix_summary_csv_path(model_dir)
+    let budgets_jsonl_path = matrix_budgets_jsonl_path(model_dir)
+    let samples_jsonl_path = matrix_samples_jsonl_path(model_dir)
+    let samples_csv_path = matrix_samples_csv_path(model_dir)
+    let failures_jsonl_path = matrix_failures_jsonl_path(model_dir)
+    let failures_csv_path = matrix_failures_csv_path(model_dir)
+    let report_md_path = matrix_report_md_path(model_dir)
+    let budget_count = bench.benchmark_runner.collection_count(budget_reports_wire)
+    let suite_size = if budget_count <= 0 {
+        0
+    } else {
+        report_wire_i32(bench.benchmark_runner.collection_item_at(budget_reports_wire, 0), 2)
+    }
+    let sample_rows = bench.benchmark_runner.collection_count(sample_rows_wire)
+    let failure_rows = bench.benchmark_runner.collection_count(failure_rows_wire)
+    discard fs.write_file(summary_json_path, benchmark_matrix_json_from_wire(budget_reports_wire))
+    discard fs.write_file(summary_csv_path, matrix_summary_csv_from_wire(budget_reports_wire))
+    discard fs.write_file(budgets_jsonl_path, budget_reports_jsonl_from_wire(budget_reports_wire))
+    discard fs.write_file(samples_jsonl_path, rows_jsonl_from_wire(sample_rows_wire))
+    discard fs.write_file(samples_csv_path, rows_csv_direct(sample_rows_wire))
+    discard fs.write_file(failures_jsonl_path, rows_jsonl_from_wire(failure_rows_wire))
+    discard fs.write_file(failures_csv_path, rows_csv_direct(failure_rows_wire))
+    discard fs.write_file(report_md_path, markdown_matrix_report_from_wire(model_dir, page_tokens, budget_reports_wire, failure_rows_wire))
+    discard fs.write_file("RESULTS.md", results_md_from_wire_text_fields(model_dir, page_tokens, budget_reports_wire, failure_rows_wire, summary_json_path, summary_csv_path, budgets_jsonl_path, samples_jsonl_path, samples_csv_path, failures_jsonl_path, failures_csv_path, report_md_path, budget_count))
+    return manifest_json(ArtifactManifest {
+        summary_json_path: summary_json_path, summary_csv_path: summary_csv_path, budgets_jsonl_path: budgets_jsonl_path, samples_jsonl_path: samples_jsonl_path, samples_csv_path: samples_csv_path, failures_jsonl_path: failures_jsonl_path, failures_csv_path: failures_csv_path, report_md_path: report_md_path, budget_count: budget_count, suite_size: suite_size, sample_rows: sample_rows, failure_rows: failure_rows,
+    })
+}
+fn policy_results_row(report: bench.benchmark_runner.BenchmarkReport, aggregate: bench.benchmark_runner.PolicyAggregate, failure_rows_wire: str) -> str {
+    return str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat("| ", report.budget_label), str.concat(" | ", aggregate.policy_name)), str.concat(" | ", str.from_i32(aggregate.sample_count))), str.concat(" | ", str.from_i32(aggregate.top1_agreement_pct))), str.concat(" | ", str.from_i32(aggregate.avg_effective_bytes_per_token))), str.concat(" | ", str.from_i32(aggregate.avg_block_remaps_per_sample))), str.concat(" | ", str.from_i32(aggregate.avg_old_pages_streamed))), str.concat(str.concat(" | ", str.from_i32(failure_count_by_budget_and_policy_direct(failure_rows_wire, report.budget_label, aggregate.policy_name))), " |\n"))
+}
+fn append_results_failure_examples(out: str, failure_rows_wire: str, limit: i32) -> str {
+    if bench.benchmark_runner.collection_count(failure_rows_wire) <= 0 {
+        return str.concat(out, "- none\n")
+    }
+    let mut next = out let mut idx = 0 while idx < bench.benchmark_runner.collection_count(failure_rows_wire) && idx < limit {
+        let row = bench.benchmark_runner.collection_item_at(failure_rows_wire, idx) next = str.concat(next, str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat("- `", row_str(row, 0)), "/"), row_str(row, 4)), str.concat("/", row_str(row, 2))), "` top1="), str.from_i32(row_i32(row, 17))), str.concat("% parity=", str.concat(str.from_i32(row_i32(row, 24)), str.concat(" target=", str.concat(json.str(row_str(row, 6)), "\n")))))) idx = idx + 1
+    }
+    return next
+}
+fn results_md(model_dir: str, page_tokens: i32, artifacts: bench.benchmark_runner.BenchmarkMatrixArtifacts, manifest: ArtifactManifest) -> str {
+    let model_id = model.artifacts.model_id_from_dir(model_dir) let bench_limit = env.get("FPA_BENCH_LIMIT") let suite_size = if bench.benchmark_runner.collection_count(artifacts.budget_reports_wire) <= 0 {
+        0
+    } else {
+        bench.benchmark_runner.benchmark_report_from_wire(bench.benchmark_runner.collection_item_at(artifacts.budget_reports_wire, 0)).suite_size
+    }
+    let mut rows = "" let mut notes = "" let mut idx = 0 while idx < bench.benchmark_runner.collection_count(artifacts.budget_reports_wire) {
+        let report = bench.benchmark_runner.benchmark_report_from_wire(bench.benchmark_runner.collection_item_at(artifacts.budget_reports_wire, idx)) rows = str.concat(rows, policy_results_row(report, report.full_kv, artifacts.failure_rows_wire)) rows = str.concat(rows, policy_results_row(report, report.paged_full_kv, artifacts.failure_rows_wire)) rows = str.concat(rows, policy_results_row(report, report.recent_only, artifacts.failure_rows_wire)) rows = str.concat(rows, policy_results_row(report, report.quantized_old_kv, artifacts.failure_rows_wire)) rows = str.concat(rows, policy_results_row(report, report.fidelity_paged_kv, artifacts.failure_rows_wire)) if report.fidelity_paged_kv.avg_effective_bytes_per_token < report.quantized_old_kv.avg_effective_bytes_per_token {
+            notes = str.concat(notes, str.concat("- fidelity beats quantized_old_kv on effective bytes/token at budget `", str.concat(report.budget_label, "`\n")))
+        } else {
+            notes = str.concat(notes, str.concat("- fidelity does not beat quantized_old_kv on effective bytes/token at budget `", str.concat(report.budget_label, "`\n")))
+        }
+        if report.recent_only.top1_agreement_pct < report.fidelity_paged_kv.top1_agreement_pct {
+            notes = str.concat(notes, str.concat("- recent_only underperforms fidelity at budget `", str.concat(report.budget_label, "`\n")))
+        } else {
+            notes = str.concat(notes, str.concat("- recent_only does not clearly fail versus fidelity at budget `", str.concat(report.budget_label, "`\n")))
+        }
+        idx = idx + 1
+    }
+    let mut out = "" out = str.concat(out, "# RESULTS\n\n") out = str.concat(out, str.concat("Model: `", str.concat(model_id, "`\n"))) out = str.concat(out, str.concat("Model dir: `", str.concat(model_dir, "`\n"))) out = str.concat(out, str.concat("Hardware: `", str.concat(hardware_label(), "`\n"))) out = str.concat(out, str.concat("Page tokens: `", str.concat(str.from_i32(page_tokens), "`\n"))) out = str.concat(out, str.concat("Suite size: `", str.concat(str.from_i32(suite_size), "`\n"))) out = str.concat(out, str.concat("Budget count: `", str.concat(str.from_i32(artifacts.budget_count), "`\n"))) out = str.concat(out, "Policies: `full_kv`, `paged_full_kv`, `recent_only`, `quantized_old_kv`, `fidelity_paged_kv`\n") out = str.concat(out, "Budgets: `50`, `25`, `12.5`, `6.25`, `0`\n") if bench_limit != "" {
+        out = str.concat(out, str.concat("Bench limit override: `", str.concat(bench_limit, "`\n")))
+    }
+    out = str.concat(out, "\n## Policy Matrix\n\n") out = str.concat(out, "| Budget | Policy | Samples | Top1 % | Avg Effective Bytes/Token | Avg Remaps | Avg Old Pages | Failure Rows |\n| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |\n") out = str.concat(out, rows) out = str.concat(out, "\n## Negative Results\n\n") out = str.concat(out, notes) out = str.concat(out, "\n## Failure Cases\n\n") out = append_results_failure_examples(out, artifacts.failure_rows_wire, 12) out = str.concat(out, "\n## Artifact Paths\n\n") out = str.concat(out, str.concat("- summary.json: `", str.concat(manifest.summary_json_path, "`\n"))) out = str.concat(out, str.concat("- summary.csv: `", str.concat(manifest.summary_csv_path, "`\n"))) out = str.concat(out, str.concat("- budgets.jsonl: `", str.concat(manifest.budgets_jsonl_path, "`\n"))) out = str.concat(out, str.concat("- samples.jsonl: `", str.concat(manifest.samples_jsonl_path, "`\n"))) out = str.concat(out, str.concat("- samples.csv: `", str.concat(manifest.samples_csv_path, "`\n"))) out = str.concat(out, str.concat("- failures.jsonl: `", str.concat(manifest.failures_jsonl_path, "`\n"))) out = str.concat(out, str.concat("- failures.csv: `", str.concat(manifest.failures_csv_path, "`\n"))) out = str.concat(out, str.concat("- report.md: `", str.concat(manifest.report_md_path, "`\n"))) return out
+}
+fn write_results_md(model_dir: str, page_tokens: i32, artifacts: bench.benchmark_runner.BenchmarkMatrixArtifacts, manifest: ArtifactManifest) -> str {
+    let output_path = "RESULTS.md" discard fs.write_file(output_path, results_md(model_dir, page_tokens, artifacts, manifest)) return output_path
+}

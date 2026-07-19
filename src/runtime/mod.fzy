@@ -1,0 +1,206 @@
+use core.env;
+use core.fs;
+use core.io;
+use core.process;
+
+use bench;
+use kv;
+use model;
+
+mod attention_core;
+mod block_manager;
+mod cow;
+mod decode_loop;
+mod generation_config;
+mod prefill;
+mod residency;
+mod session;
+mod sharing;
+mod tmh_plan;
+
+fn trace_enabled() -> i32 {
+    if env.get("FPA_TRACE_RUNTIME") == "1" {
+        return 1
+    }
+    return 0
+}
+
+fn trace_line(label: str) {
+    if trace_enabled() == 1 {
+        discard term.write(str.concat(str.concat("FPA_TRACE ", label), "\n"))
+    }
+}
+
+fn prompt_text_for_mode(default_prompt: str) -> str {
+    let configured_file = env.get("FPA_PROMPT_TEXT_FILE")
+    if configured_file != "" {
+        let from_file = fs.read_file(configured_file)
+        if from_file != "" {
+            return from_file
+        }
+    }
+    let configured = env.get("FPA_PROMPT_TEXT")
+    if configured != "" {
+        return configured
+    }
+    return default_prompt
+}
+
+fn child_bench_decode_requested() -> i32 {
+    if process.argv_or(1, "") == "--child-bench-decode" {
+        return 1
+    }
+    return 0
+}
+
+fn child_bench_budget_requested() -> i32 {
+    if process.argv_or(1, "") == "--child-bench-budget" {
+        return 1
+    }
+    return 0
+}
+
+host fn boot() -> i32 {
+    return 0
+}
+
+host fn inspect_and_report() -> i32 {
+    let model_dir = env.get("FPA_MODEL_DIR")
+    let page_tokens = if env.get("FPA_PAGE_TOKENS") == "" {
+        64
+    } else {
+        model.artifacts.parse_i32(env.get("FPA_PAGE_TOKENS"))
+    }
+    let hot_budget_pct = if env.get("FPA_HOT_BUDGET_PCT") == "" {
+        25
+    } else {
+        model.artifacts.parse_i32(env.get("FPA_HOT_BUDGET_PCT"))
+    }
+    if model_dir == "" {
+        discard term.write("FPA_ERROR missing_model_dir_env=FPA_MODEL_DIR\n")
+        return 40
+    }
+    if io.is_dir(model_dir) == 0 {
+        discard term.write(str.concat(str.concat("FPA_ERROR missing_model_dir=", model_dir), "\n"))
+        return 41
+    }
+    let artifact = model.artifacts.inspect_model_dir(model_dir, page_tokens, hot_budget_pct)
+    trace_line("artifact_ready")
+    let shape = model.artifacts.resolve_shape(model_dir, page_tokens)
+    trace_line("shape_ready")
+    let mode = if child_bench_decode_requested() == 1 {
+        "decode_timed"
+    } else if child_bench_budget_requested() == 1 {
+        "bench_budget"
+    } else if env.get("FPA_MODE") == "" {
+        "bench"
+    } else {
+        env.get("FPA_MODE")
+    }
+    if mode == "bench" {
+        discard term.write(str.concat(str.concat("FPA_ARTIFACT ", model.artifacts.report_json(artifact)), "\n"))
+        discard term.write(bench.report_writer.run_bench_output_text(shape, model_dir, page_tokens, hot_budget_pct))
+        return 0
+    }
+    if mode == "bench_budget" {
+        let budget_label = if env.get("FPA_BENCH_BUDGET_LABEL") == "" {
+            bench.benchmark_runner.budget_label_from_pct(hot_budget_pct)
+        } else {
+            env.get("FPA_BENCH_BUDGET_LABEL")
+        }
+        let bundle = bench.benchmark_runner.run_budget_bundle(shape, model_dir, page_tokens, budget_label, hot_budget_pct)
+        discard term.write(
+            str.concat(
+                str.concat(
+                    "FPA_BENCH_BUDGET ",
+                    bench.benchmark_runner.frame_push("", bundle)
+                ),
+                "\n"
+            )
+        )
+        return 0
+    }
+    let loaded = model.model_loader.load(model_dir, page_tokens)
+    trace_line("model_loaded")
+    let base_cfg = session.from_env(shape, model_dir)
+    trace_line("session_cfg_ready")
+    let prompt = model.tokenizer_bridge.encode(prompt_text_for_mode("runtime inspect prompt"), loaded.vocab_size)
+    trace_line("prompt_ready")
+    if mode == "decode" {
+        let max_new_tokens = if env.get("FPA_MAX_NEW_TOKENS") == "" { 16 } else { model.artifacts.parse_i32(env.get("FPA_MAX_NEW_TOKENS")) }
+        let eos_token_id = if env.get("FPA_EOS_TOKEN_ID") == "" { 0 } else { model.artifacts.parse_i32(env.get("FPA_EOS_TOKEN_ID")) }
+        let stop_on_eos = if env.get("FPA_STOP_ON_EOS") == "" { 0 } else { model.artifacts.parse_i32(env.get("FPA_STOP_ON_EOS")) }
+        let generation_cfg = generation_config.config(max_new_tokens, eos_token_id, stop_on_eos, 0, loaded.vocab_size)
+        let decode_cfg = session.config(model_dir, page_tokens, hot_budget_pct, prompt.token_count, 0, base_cfg.policy_name)
+        trace_line("decode_begin")
+        let decode_json = decode_loop.run_json(loaded, decode_cfg, generation_cfg, prompt)
+        if env.get("FPA_DECODE_OUT_FILE") != "" {
+            discard fs.write_file(env.get("FPA_DECODE_OUT_FILE"), decode_json)
+        }
+        discard term.write(str.concat(str.concat("FPA_DECODE ", decode_json), "\n"))
+        return 0
+    }
+    if mode == "decode_timed" {
+        let max_new_tokens = if env.get("FPA_MAX_NEW_TOKENS") == "" { 16 } else { model.artifacts.parse_i32(env.get("FPA_MAX_NEW_TOKENS")) }
+        let timed_wire = decode_loop.run_timed_wire_direct(loaded, model_dir, page_tokens, hot_budget_pct, max_new_tokens, base_cfg.policy_name, prompt)
+        let timed_json = decode_loop.timed_result_json_from_wire(timed_wire)
+        if env.get("FPA_DECODE_TIMED_OUT_FILE") != "" {
+            discard fs.write_file(env.get("FPA_DECODE_TIMED_OUT_FILE"), timed_json)
+        }
+        discard term.write(str.concat(str.concat("FPA_DECODE_TIMED ", timed_json), "\n"))
+        return 0
+    }
+    discard term.write(str.concat(str.concat("FPA_ARTIFACT ", model.artifacts.report_json(artifact)), "\n"))
+    let inspect_cfg = session.config(model_dir, page_tokens, hot_budget_pct, prompt.token_count, 0, base_cfg.policy_name)
+    let inspect_state = session.begin_with_prompt(shape, inspect_cfg, prompt)
+    trace_line("session_state_ready")
+    if trace_enabled() == 1 {
+        let direct_manager = block_manager.build_session(shape, hot_budget_pct, base_cfg.policy_name, inspect_state.used_pages, inspect_state.tail_page_tokens)
+        let inspect_manager = session.manager_of(shape, inspect_cfg.policy_name, inspect_state)
+        let direct_pool = block_manager.pool_of(direct_manager)
+        let direct_table = block_manager.table_at(direct_manager, 0)
+        let inspect_table = block_manager.table_at(inspect_manager, 0)
+        let inspect_table_wire = block_manager.table_segment(inspect_manager.layer_tables_wire, 0)
+        let inspect_pool = block_manager.pool_of(inspect_manager)
+        let inspect_first_ref = kv.logical_block_table.ref_at_from_refs(inspect_table_wire, 0)
+        let inspect_first_block_wire = kv.physical_block_pool.block_segment(inspect_manager.pool_blocks_wire, inspect_first_ref.physical_block_id)
+        let direct_ref = kv.logical_block_table.ref_at(direct_table, 0)
+        let direct_block = kv.physical_block_pool.block_at(direct_pool, direct_ref.physical_block_id)
+        let first_block_wire = kv.physical_block_pool.block_segment(direct_manager.pool_blocks_wire, 0)
+        let trace_payload = str.concat(
+            str.concat(
+                str.concat(
+                    str.concat(
+                        str.concat(
+                            str.concat(
+                                str.concat(
+                                    str.concat("FPA_TRACE_MANAGER direct_table_wire_len=", str.from_i32(str.len(direct_manager.layer_tables_wire))),
+                                    str.concat(" direct_table_count=", str.from_i32(block_manager.table_count(direct_manager.layer_tables_wire)))
+                                ),
+                                str.concat(" direct_first_refs=", str.from_i32(kv.logical_block_table.len(direct_table)))
+                            ),
+                            str.concat(" state_table_wire_len=", str.from_i32(str.len(inspect_manager.layer_tables_wire)))
+                        ),
+                        str.concat(" state_table_count=", str.from_i32(block_manager.table_count(inspect_manager.layer_tables_wire)))
+                    ),
+                    str.concat(" state_first_refs=", str.from_i32(kv.logical_block_table.len(inspect_table)))
+                ),
+                str.concat(str.concat(str.concat(" pool_blocks_len=", str.from_i32(kv.physical_block_pool.blocks_len(direct_manager.pool_blocks_wire))), str.concat(" state_pool_blocks_len=", str.from_i32(kv.physical_block_pool.blocks_len(inspect_manager.pool_blocks_wire)))), str.concat(str.concat(" state_first_table_wire=", inspect_table_wire), str.concat(" state_first_block_wire=", inspect_first_block_wire)))
+            ),
+            str.concat(
+                str.concat(
+                    str.concat(" first_block_k=", direct_block.k_precision_name),
+                    str.concat(" first_block_v=", direct_block.v_precision_name)
+                ),
+                str.concat(str.concat(" first_block_wire=", first_block_wire), "\n")
+            )
+        )
+        discard term.write(trace_payload)
+    }
+    discard term.write(str.concat(str.concat("FPA_PREFILL ", prefill.report_json(prefill.report(loaded, prompt))), "\n"))
+    trace_line("prefill_reported")
+    discard term.write(str.concat(str.concat("FPA_SESSION ", residency.report_json_from(shape, inspect_cfg, inspect_state)), "\n"))
+    trace_line("session_reported")
+    discard term.write(str.concat(str.concat("FPA_ATTENTION ", attention_core.with_parity_json(shape, inspect_cfg, inspect_state, prompt.token_ids_wire, "")), "\n"))
+    return 0
+}

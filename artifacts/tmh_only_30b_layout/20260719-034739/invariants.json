@@ -1,0 +1,11 @@
+{
+  "cases_with_failures": 0,
+  "checked_layer_pages": 149040,
+  "cold_bytes_total": 0,
+  "dropped_k_pages_total": 0,
+  "dropped_v_pages_total": 0,
+  "kv_layout": "tmh_fidelity_paged_kv",
+  "layout_count": 1,
+  "total_shadowed_layer_page_matches": 0,
+  "validation_pass_rate_pct": 100.0
+}

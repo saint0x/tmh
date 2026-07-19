@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "name": "tmh-only-30b-layout-standalone",
+  "steps": [
+    {
+      "type": "proc_when",
+      "cmd": "/usr/bin/python3",
+      "args": [
+        "/home/deepsaint/work/kv-tiered/tmh/standalone_harness/validate_tmh_only_30b_layout.py"
+      ],
+      "exit_code": 0,
+      "stdout": "tmh-plan-ok\n",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "/usr/bin/python3",
+      "args": [
+        "/home/deepsaint/work/kv-tiered/tmh/standalone_harness/validate_tmh_only_30b_layout.py"
+      ],
+      "expect_exit": 0,
+      "expect_stdout": "tmh-plan-ok\n"
+    }
+  ]
+}

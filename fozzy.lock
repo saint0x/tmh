@@ -1,0 +1,12 @@
+{
+  "dependencyGraphHash": "a836e4cc5998cea76488ef81676d43174a80dee976cc6c64405c499fd23b56c9",
+  "graph": {
+    "deps": [],
+    "package": {
+      "manifestHash": "be61648ece38a6f685d319eae4c555b0f9febc425cf55e92d563528925a33437",
+      "name": "tmh",
+      "version": "0.1.0"
+    }
+  },
+  "schemaVersion": "fozzylang.lock.v0"
+}

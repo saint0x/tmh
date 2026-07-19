@@ -1,0 +1,269 @@
+use core.env;
+use kv;
+use model;
+use runtime;
+fn min_i32(lhs: i32, rhs: i32) -> i32 {
+    if lhs < rhs {
+        return lhs
+    }
+    return rhs
+}
+fn max_i32(lhs: i32, rhs: i32) -> i32 {
+    if lhs > rhs {
+        return lhs
+    }
+    return rhs
+}
+fn trace_enabled() -> i32 {
+    if env.get("FPA_TRACE_RUNTIME") == "1" {
+        return 1
+    }
+    return 0
+}
+fn trace_line(label: str) {
+    if trace_enabled() == 1 {
+        discard term.write(str.concat(str.concat("FPA_TRACE_FWD ", label), "\n"))
+    }
+}
+fn positive(value: i32) -> i32 {
+    if value < 0 {
+        return 0 - value
+    }
+    return value
+}
+fn signed_hash(seed: i32) -> i32 {
+    let mixed = (seed * 1103) + (seed / 7) + 97 return(mixed% 2047) - 1023
+}
+fn active_archive(loaded: model.model_loader.LoadedModel) -> model.safetensors_loader.TensorArchive {
+    return loaded.archive
+}
+fn lane_budget(loaded: model.model_loader.LoadedModel) -> i32 {
+    return max_i32(2, min_i32(4, loaded.head_dim))
+}
+fn head_budget(loaded: model.model_loader.LoadedModel) -> i32 {
+    return 1
+}
+fn layer_budget(loaded: model.model_loader.LoadedModel) -> i32 {
+    return max_i32(1, min_i32(2, loaded.layer_count))
+}
+fn sampled_layer_id(loaded: model.model_loader.LoadedModel, layer_index: i32) -> i32 {
+    if layer_budget(loaded) <= 1 || layer_index <= 0 {
+        return 0
+    }
+    return loaded.layer_count - 1
+}
+fn token_wire_count(token_ids_wire: str) -> i32 {
+    if token_ids_wire == "" {
+        return 0
+    }
+    return str.len(token_ids_wire) / model.tokenizer_bridge.token_wire_width()
+}
+fn token_wire_at(token_ids_wire: str, position: i32) -> i32 {
+    if position < 0 {
+        return 0
+    }
+    return model.tokenizer_bridge.token_id_from_wire(token_ids_wire, position)
+}
+fn token_wire_start_index(token_ids_wire: str, position: i32) -> i32 {
+    if token_ids_wire == "" || position < 0 {
+        return 0
+    }
+    let start = position * model.tokenizer_bridge.token_wire_width()
+    if start > str.len(token_ids_wire) {
+        return str.len(token_ids_wire)
+    }
+    return start
+}
+fn token_wire_end_index(token_ids_wire: str, start: i32) -> i32 {
+    let end = start + model.tokenizer_bridge.token_wire_width()
+    if end > str.len(token_ids_wire) {
+        return str.len(token_ids_wire)
+    }
+    return end
+}
+fn token_wire_token_at_start(token_ids_wire: str, start: i32) -> i32 {
+    if token_ids_wire == "" || start < 0 || start > str.len(token_ids_wire) {
+        return 0
+    }
+    return model.tokenizer_bridge.token_id_from_wire(token_ids_wire, start / model.tokenizer_bridge.token_wire_width())
+}
+fn token_wire_next_start(token_ids_wire: str, start: i32) -> i32 {
+    let end = token_wire_end_index(token_ids_wire, start)
+    if end >= str.len(token_ids_wire) {
+        return str.len(token_ids_wire)
+    }
+    return end
+}
+fn prompt_token_at(prompt_token_ids_wire: str, position: i32) -> i32 {
+    return token_wire_at(prompt_token_ids_wire, position)
+}
+fn prompt_tail_token(prompt_token_ids_wire: str, prompt_token_count: i32) -> i32 {
+    if prompt_token_count <= 0 {
+        return 0
+    }
+    return prompt_token_at(prompt_token_ids_wire, prompt_token_count - 1)
+}
+fn sequence_tail_position(state: runtime.session.SessionState) -> i32 {
+    if state.total_tokens <= 0 {
+        return 0
+    }
+    return state.total_tokens - 1
+}
+fn sequence_tail_token(state: runtime.session.SessionState, prompt_token_ids_wire: str, decode_token_ids_wire: str) -> i32 {
+    return runtime.session.token_id_at_parts(state, prompt_token_ids_wire, decode_token_ids_wire, sequence_tail_position(state))
+}
+fn weight_value(loaded: model.model_loader.LoadedModel, scope: i32, layer_id: i32, lane_id: i32, col_id: i32) -> i32 {
+    let seed = loaded.artifact_fingerprint + (scope * 193) + (layer_id * 97) + (lane_id * 53) + (col_id * 31) return signed_hash(seed)
+}
+fn embedding_value(loaded: model.model_loader.LoadedModel, archive: model.safetensors_loader.TensorArchive, token_id: i32, position: i32, lane_id: i32) -> i32 {
+    let _archive = archive
+    return weight_value(loaded, 1, token_id% max_i32(1, loaded.layer_count), lane_id, token_id)
+}
+fn rms_norm_scalar(value: i32, lane_id: i32) -> i32 {
+    let denom = positive(value) + (lane_id * 9) + 64 if denom <= 0 {
+        return value
+    }
+    return(value * 256) / denom
+}
+fn precision_scale_name(precision_name: str) -> i32 {
+    if precision_name == "raw" {
+        return 256
+    }
+    if precision_name == "int8" {
+        return 224
+    }
+    if precision_name == "int4" {
+        return 176
+    }
+    return 0
+}
+fn query_component(loaded: model.model_loader.LoadedModel, archive: model.safetensors_loader.TensorArchive, state: runtime.session.SessionState, prompt_token_ids_wire: str, decode_token_ids_wire: str, activation_seed: i32, layer_id: i32, head_id: i32, lane_id: i32, hidden_value: i32, decode_step: i32) -> i32 {
+    let _archive = archive let query_token_id = sequence_tail_token(state, prompt_token_ids_wire, decode_token_ids_wire) let projection = weight_value(loaded, 13 + head_id, layer_id, lane_id, query_token_id + decode_step) return rms_norm_scalar(hidden_value + projection + activation_seed, lane_id)
+}
+fn key_component(loaded: model.model_loader.LoadedModel, archive: model.safetensors_loader.TensorArchive, layer_id: i32, head_id: i32, lane_id: i32, token_id: i32, position: i32, k_precision_name: str) -> i32 {
+    let base = token_feature_with_archive(loaded, archive, token_id, position, layer_id, head_id, lane_id) + weight_value(loaded, 29 + head_id, layer_id, lane_id, token_id)
+    return(base * precision_scale_name(k_precision_name)) / 256
+}
+fn value_component(loaded: model.model_loader.LoadedModel, archive: model.safetensors_loader.TensorArchive, layer_id: i32, head_id: i32, lane_id: i32, token_id: i32, position: i32, v_precision_name: str) -> i32 {
+    let base = token_feature_with_archive(loaded, archive, token_id, position, layer_id + 1, head_id, lane_id) + weight_value(loaded, 43 + head_id, layer_id, lane_id, token_id)
+    return(base * precision_scale_name(v_precision_name)) / 256
+}
+fn token_feature_with_archive(loaded: model.model_loader.LoadedModel, archive: model.safetensors_loader.TensorArchive, token_id: i32, position: i32, layer_id: i32, head_id: i32, lane_id: i32) -> i32 {
+    let embed = embedding_value(loaded, archive, token_id, position, lane_id) let rotary = weight_value(loaded, 2 + head_id, layer_id, lane_id, token_id) return embed + (rotary / 2) + (token_id% 17)
+}
+fn attention_head_context(loaded: model.model_loader.LoadedModel, archive: model.safetensors_loader.TensorArchive, state: runtime.session.SessionState, prompt_token_ids_wire: str, decode_token_ids_wire: str, manager: runtime.block_manager.ManagedSession, activation_seed: i32, layer_id: i32, head_id: i32, lane_id: i32, hidden_value: i32, decode_step: i32) -> i32 {
+    let table_refs_wire = runtime.block_manager.table_segment(manager.layer_tables_wire, layer_id) let pool_blocks_wire = manager.pool_blocks_wire let query = query_component(loaded, archive, state, prompt_token_ids_wire, decode_token_ids_wire, activation_seed, layer_id, head_id, lane_id, hidden_value, decode_step) let mut best_score = - 100000000 let mut best_value = 0 let mut logical_block_id = 0 while logical_block_id < kv.logical_block_table.refs_len(table_refs_wire) {
+        let physical_block_id = kv.logical_block_table.ref_physical_block_id_at_from_refs(table_refs_wire, logical_block_id) let token_count = kv.logical_block_table.ref_token_count_at_from_refs(table_refs_wire, logical_block_id) let block_wire = kv.physical_block_pool.block_segment(pool_blocks_wire, physical_block_id) let block_start_token = kv.physical_block_pool.block_start_token_from_wire(block_wire) let block_is_hot = kv.physical_block_pool.block_is_hot_from_wire(block_wire) let k_precision_name = kv.physical_block_pool.block_k_precision_name_from_wire(block_wire) let v_precision_name = kv.physical_block_pool.block_v_precision_name_from_wire(block_wire) let mut prompt_cursor = if block_start_token < state.prompt_tokens { token_wire_start_index(prompt_token_ids_wire, block_start_token) } else { str.len(prompt_token_ids_wire) } let mut decode_cursor = if block_start_token >= state.prompt_tokens { token_wire_start_index(decode_token_ids_wire, block_start_token - state.prompt_tokens) } else { 0 } let mut offset = 0 while offset < token_count {
+            let token_position = block_start_token + offset let mut token_id = 0 if token_position < state.prompt_tokens {
+                token_id = token_wire_token_at_start(prompt_token_ids_wire, prompt_cursor) prompt_cursor = token_wire_next_start(prompt_token_ids_wire, prompt_cursor)
+            } else {
+                token_id = token_wire_token_at_start(decode_token_ids_wire, decode_cursor) decode_cursor = token_wire_next_start(decode_token_ids_wire, decode_cursor)
+            }
+            let key = key_component(loaded, archive, layer_id, head_id, lane_id, token_id, token_position, k_precision_name) let value = value_component(loaded, archive, layer_id, head_id, lane_id, token_id, token_position, v_precision_name) let score = (query * key) / 64 + (block_is_hot * 17) + (offset * 3) if score > best_score {
+                best_score = score best_value = value
+            }
+            offset = offset + 1
+        }
+        logical_block_id = logical_block_id + 1
+    }
+    return best_value
+}
+fn mlp_mix(loaded: model.model_loader.LoadedModel, layer_id: i32, lane_id: i32, attn_value: i32, hidden_value: i32) -> i32 {
+    let gate = weight_value(loaded, 71, layer_id, lane_id, attn_value + hidden_value) let up = weight_value(loaded, 73, layer_id, lane_id, attn_value - hidden_value) let activated = if gate > 0 {
+        gate
+    } else {
+        gate / 4
+    }
+    return(activated * up) / 128
+}
+fn layer_hidden_component(loaded: model.model_loader.LoadedModel, archive: model.safetensors_loader.TensorArchive, state: runtime.session.SessionState, prompt_token_ids_wire: str, decode_token_ids_wire: str, manager: runtime.block_manager.ManagedSession, activation_seed: i32, layer_id: i32, lane_id: i32, decode_step: i32, hidden_value: i32) -> i32 {
+    let mut head_id = 0 let mut attn_total = 0 while head_id < head_budget(loaded) {
+        attn_total = attn_total + attention_head_context(loaded, archive, state, prompt_token_ids_wire, decode_token_ids_wire, manager, activation_seed, layer_id, head_id, lane_id, hidden_value, decode_step) head_id = head_id + 1
+    }
+    let attn_mix = attn_total / head_budget(loaded) let mlp = mlp_mix(loaded, layer_id, lane_id, attn_mix, hidden_value) let out_proj = weight_value(loaded, 89, layer_id, lane_id, attn_mix + mlp) let norm = 0
+    return hidden_value + (attn_mix / 3) + (mlp / 5) + (out_proj / 7) + (norm / 9)
+}
+fn final_hidden_component(loaded: model.model_loader.LoadedModel, archive: model.safetensors_loader.TensorArchive, prompt_sum: i32, activation_seed: i32, state: runtime.session.SessionState, prompt_token_ids_wire: str, decode_token_ids_wire: str, manager: runtime.block_manager.ManagedSession, decode_step: i32, lane_id: i32) -> i32 {
+    let tail_token = sequence_tail_token(state, prompt_token_ids_wire, decode_token_ids_wire) let position = sequence_tail_position(state) let mut hidden = embedding_value(loaded, archive, tail_token, position, lane_id) + weight_value(loaded, 97, 0, lane_id, prompt_sum) let mut layer_index = 0 while layer_index < layer_budget(loaded) {
+        hidden = layer_hidden_component(loaded, archive, state, prompt_token_ids_wire, decode_token_ids_wire, manager, activation_seed, sampled_layer_id(loaded, layer_index), lane_id, decode_step, hidden) layer_index = layer_index + 1
+    }
+    return rms_norm_scalar(hidden + loaded.config_checksum, lane_id)
+}
+fn hidden_lane(loaded: model.model_loader.LoadedModel, archive: model.safetensors_loader.TensorArchive, prompt_sum: i32, activation_seed: i32, state: runtime.session.SessionState, prompt_token_ids_wire: str, decode_token_ids_wire: str, manager: runtime.block_manager.ManagedSession, decode_step: i32, lane_id: i32, width: i32) -> i32 {
+    if lane_id >= width {
+        return 0
+    }
+    return final_hidden_component(loaded, archive, prompt_sum, activation_seed, state, prompt_token_ids_wire, decode_token_ids_wire, manager, decode_step, lane_id)
+}
+fn candidate_logit(loaded: model.model_loader.LoadedModel, archive: model.safetensors_loader.TensorArchive, prompt_sum: i32, activation_seed: i32, state: runtime.session.SessionState, policy_name: str, prompt_token_ids_wire: str, decode_token_ids_wire: str, decode_step: i32, candidate_token_id: i32) -> i32 {
+    let mut lane_id = 0 let mut total = 0 while lane_id < lane_budget(loaded) {
+        let hidden = final_hidden_component(loaded, archive, prompt_sum, activation_seed, state, prompt_token_ids_wire, decode_token_ids_wire, runtime.session.manager_of(loaded.shape, policy_name, state), decode_step, lane_id) let head = weight_value(loaded, 109, candidate_token_id% max_i32(1, loaded.layer_count), lane_id, candidate_token_id)
+        total = total + ((hidden * head) / 64) lane_id = lane_id + 1
+    }
+    return total
+}
+fn lane_value_if_active(value: i32, lane_index: i32, active_lanes: i32) -> i32 {
+    if lane_index < active_lanes {
+        return value
+    }
+    return 0
+}
+fn logits_score_from_lanes(loaded: model.model_loader.LoadedModel, archive: model.safetensors_loader.TensorArchive, width: i32, lane0_hidden: i32, lane1_hidden: i32, lane2_hidden: i32, lane3_hidden: i32, lane4_hidden: i32, lane5_hidden: i32, lane6_hidden: i32, lane7_hidden: i32, candidate_token_id: i32) -> i32 {
+    let lane0 = lane_value_if_active(lane0_hidden, 0, width) * lane_value_if_active(output_weight_value(loaded, archive, candidate_token_id, 0), 0, width)
+    let lane1 = lane_value_if_active(lane1_hidden, 1, width) * lane_value_if_active(output_weight_value(loaded, archive, candidate_token_id, 1), 1, width)
+    let lane2 = lane_value_if_active(lane2_hidden, 2, width) * lane_value_if_active(output_weight_value(loaded, archive, candidate_token_id, 2), 2, width)
+    let lane3 = lane_value_if_active(lane3_hidden, 3, width) * lane_value_if_active(output_weight_value(loaded, archive, candidate_token_id, 3), 3, width)
+    let lane4 = lane_value_if_active(lane4_hidden, 4, width) * lane_value_if_active(output_weight_value(loaded, archive, candidate_token_id, 4), 4, width)
+    let lane5 = lane_value_if_active(lane5_hidden, 5, width) * lane_value_if_active(output_weight_value(loaded, archive, candidate_token_id, 5), 5, width)
+    let lane6 = lane_value_if_active(lane6_hidden, 6, width) * lane_value_if_active(output_weight_value(loaded, archive, candidate_token_id, 6), 6, width)
+    let lane7 = lane_value_if_active(lane7_hidden, 7, width) * lane_value_if_active(output_weight_value(loaded, archive, candidate_token_id, 7), 7, width)
+    return ((lane0 + lane1 + lane2 + lane3 + lane4 + lane5 + lane6 + lane7) / 64)
+}
+fn output_weight_name(loaded: model.model_loader.LoadedModel, archive: model.safetensors_loader.TensorArchive) -> str {
+    let _loaded = loaded
+    let lm_head = model.safetensors_loader.find(archive, "lm_head.weight") if lm_head.name != "" {
+        return "lm_head.weight"
+    }
+    return "transformer.wte.weight"
+}
+fn output_weight_value(loaded: model.model_loader.LoadedModel, archive: model.safetensors_loader.TensorArchive, token_id: i32, lane_id: i32) -> i32 {
+    let name = output_weight_name(loaded, archive) let desc = model.safetensors_loader.find(archive, name) if desc.name == "" {
+        return 0
+    }
+    return model.safetensors_loader.read_2d(archive, name, positive_mod(token_id, max_i32(1, desc.dim0)), lane_id)
+}
+fn top_logits(loaded: model.model_loader.LoadedModel, prefill: model.qwen_runner.PrefillState, state: runtime.session.SessionState, policy_name: str, prompt_token_ids_wire: str, decode_token_ids_wire: str, decode_step: i32, vocab_size: i32) -> model.qwen_runner.StepLogits {
+    return top_logits_with_manager(loaded, prefill, state, prompt_token_ids_wire, decode_token_ids_wire, runtime.session.manager_of(loaded.shape, policy_name, state), decode_step, vocab_size)
+}
+fn top_logits_with_manager(loaded: model.model_loader.LoadedModel, prefill: model.qwen_runner.PrefillState, state: runtime.session.SessionState, prompt_token_ids_wire: str, decode_token_ids_wire: str, manager: runtime.block_manager.ManagedSession, decode_step: i32, vocab_size: i32) -> model.qwen_runner.StepLogits {
+    let archive = active_archive(loaded) let width = lane_budget(loaded) let lane0_hidden = hidden_lane(loaded, archive, prefill.prompt_checksum, prefill.activation_seed, state, prompt_token_ids_wire, decode_token_ids_wire, manager, decode_step, 0, width) let lane1_hidden = hidden_lane(loaded, archive, prefill.prompt_checksum, prefill.activation_seed, state, prompt_token_ids_wire, decode_token_ids_wire, manager, decode_step, 1, width) let lane2_hidden = hidden_lane(loaded, archive, prefill.prompt_checksum, prefill.activation_seed, state, prompt_token_ids_wire, decode_token_ids_wire, manager, decode_step, 2, width) let lane3_hidden = hidden_lane(loaded, archive, prefill.prompt_checksum, prefill.activation_seed, state, prompt_token_ids_wire, decode_token_ids_wire, manager, decode_step, 3, width) let lane4_hidden = hidden_lane(loaded, archive, prefill.prompt_checksum, prefill.activation_seed, state, prompt_token_ids_wire, decode_token_ids_wire, manager, decode_step, 4, width) let lane5_hidden = hidden_lane(loaded, archive, prefill.prompt_checksum, prefill.activation_seed, state, prompt_token_ids_wire, decode_token_ids_wire, manager, decode_step, 5, width) let lane6_hidden = hidden_lane(loaded, archive, prefill.prompt_checksum, prefill.activation_seed, state, prompt_token_ids_wire, decode_token_ids_wire, manager, decode_step, 6, width) let lane7_hidden = hidden_lane(loaded, archive, prefill.prompt_checksum, prefill.activation_seed, state, prompt_token_ids_wire, decode_token_ids_wire, manager, decode_step, 7, width) let safe_vocab = max_i32(1, vocab_size) let mut token_id = 0 let mut best_token_id = 0 let mut best_score = - 100000000 let mut alt_token_id = 0 let mut alt_score = - 100000000 let mut checksum = 0 while token_id < safe_vocab {
+        let score = logits_score_from_lanes(loaded, archive, width, lane0_hidden, lane1_hidden, lane2_hidden, lane3_hidden, lane4_hidden, lane5_hidden, lane6_hidden, lane7_hidden, token_id) checksum = checksum + score + token_id if score > best_score {
+            alt_token_id = best_token_id alt_score = best_score best_token_id = token_id best_score = score
+        } else if score > alt_score {
+            alt_token_id = token_id alt_score = score
+        }
+        token_id = token_id + 1
+    }
+    return model.qwen_runner.step_logits_record(best_token_id, best_score, alt_token_id, alt_score, checksum)
+}
+fn top_token_id(loaded: model.model_loader.LoadedModel, prompt_sum: i32, activation_seed: i32, state: runtime.session.SessionState, policy_name: str, prompt_token_ids_wire: str, decode_token_ids_wire: str, decode_step: i32, vocab_size: i32) -> i32 {
+    return top_token_id_with_manager(loaded, prompt_sum, activation_seed, state, prompt_token_ids_wire, decode_token_ids_wire, runtime.session.manager_of(loaded.shape, policy_name, state), decode_step, vocab_size)
+}
+fn top_token_id_with_manager(loaded: model.model_loader.LoadedModel, prompt_sum: i32, activation_seed: i32, state: runtime.session.SessionState, prompt_token_ids_wire: str, decode_token_ids_wire: str, manager: runtime.block_manager.ManagedSession, decode_step: i32, vocab_size: i32) -> i32 {
+    let archive = active_archive(loaded) let width = lane_budget(loaded) let lane0_hidden = hidden_lane(loaded, archive, prompt_sum, activation_seed, state, prompt_token_ids_wire, decode_token_ids_wire, manager, decode_step, 0, width) let lane1_hidden = hidden_lane(loaded, archive, prompt_sum, activation_seed, state, prompt_token_ids_wire, decode_token_ids_wire, manager, decode_step, 1, width) let lane2_hidden = hidden_lane(loaded, archive, prompt_sum, activation_seed, state, prompt_token_ids_wire, decode_token_ids_wire, manager, decode_step, 2, width) let lane3_hidden = hidden_lane(loaded, archive, prompt_sum, activation_seed, state, prompt_token_ids_wire, decode_token_ids_wire, manager, decode_step, 3, width) let lane4_hidden = hidden_lane(loaded, archive, prompt_sum, activation_seed, state, prompt_token_ids_wire, decode_token_ids_wire, manager, decode_step, 4, width) let lane5_hidden = hidden_lane(loaded, archive, prompt_sum, activation_seed, state, prompt_token_ids_wire, decode_token_ids_wire, manager, decode_step, 5, width) let lane6_hidden = hidden_lane(loaded, archive, prompt_sum, activation_seed, state, prompt_token_ids_wire, decode_token_ids_wire, manager, decode_step, 6, width) let lane7_hidden = hidden_lane(loaded, archive, prompt_sum, activation_seed, state, prompt_token_ids_wire, decode_token_ids_wire, manager, decode_step, 7, width) let safe_vocab = max_i32(1, vocab_size) let mut token_id = 0 let mut best_token_id = 0 let mut best_score = - 100000000 while token_id < safe_vocab {
+        let score = logits_score_from_lanes(loaded, archive, width, lane0_hidden, lane1_hidden, lane2_hidden, lane3_hidden, lane4_hidden, lane5_hidden, lane6_hidden, lane7_hidden, token_id) if score > best_score {
+            best_token_id = token_id best_score = score
+        }
+        token_id = token_id + 1
+    }
+    return best_token_id
+}
+fn positive_mod(value: i32, modulo: i32) -> i32 {
+    if modulo <= 0 {
+        return 0
+    }
+    let raw = value% modulo if raw < 0 {
+        return raw + modulo
+    }
+    return raw
+}

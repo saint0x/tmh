@@ -1,0 +1,200 @@
+use kv;
+use model;
+use runtime.session;
+use core.env;
+struct TierCounts {
+    hot_pages: i32, warm_pages: i32, cold_pages: i32, late_protected_pages: i32,
+}
+struct PoolMemoryReport {
+    hot_bytes: i32, warm_bytes: i32, cold_bytes: i32,
+}
+struct PrecisionCensus {
+    raw_k_pages: i32, int8_k_pages: i32, int4_k_pages: i32, dropped_k_pages: i32, raw_v_pages: i32, int8_v_pages: i32, int4_v_pages: i32, dropped_v_pages: i32,
+}
+struct SessionResidencyReport {
+    model_dir: str, policy_name: str, prompt_tokens: i32, decode_tokens: i32, total_tokens: i32, prefill_pages: i32, decode_pages: i32, used_pages: i32, tail_page_tokens: i32, hot_budget_pct: i32, hot_pages: i32, recent_start_page: i32, hot_layer_pages: i32, warm_layer_pages: i32, cold_layer_pages: i32, late_protected_layer_pages: i32, hot_bytes: i32, warm_bytes: i32, cold_bytes: i32, effective_bytes_per_token: i32, block_remap_count: i32, copy_on_write_count: i32, shared_block_count: i32, raw_k_pages: i32, int8_k_pages: i32, int4_k_pages: i32, dropped_k_pages: i32, raw_v_pages: i32, int8_v_pages: i32, int4_v_pages: i32, dropped_v_pages: i32, first_page_k_precision: str, first_page_v_precision: str, last_page_k_precision: str, last_page_v_precision: str,
+}
+struct FrameRead {
+    value: str, next_idx: i32,
+}
+fn frame_push(wire: str, value: str) -> str {
+    return str.concat(str.concat(str.concat(wire, str.from_i32(str.len(value))), "#"), value)
+}
+fn frame_sep(wire: str, start: i32) -> i32 {
+    let mut idx = start while idx < str.len(wire) {
+        if str.slice(wire, idx, idx + 1) == "#" {
+            return idx
+        }
+        idx = idx + 1
+    }
+    return - 1
+}
+fn frame_read_next(wire: str, start: i32) -> FrameRead {
+    let sep = frame_sep(wire, start) if sep < 0 {
+        return FrameRead {
+            value: "", next_idx: str.len(wire)
+        }
+    }
+    let size = model.artifacts.parse_i32(str.slice(wire, start, sep)) let value_start = sep + 1 let value_end = value_start + size return FrameRead {
+        value: str.slice(wire, value_start, value_end), next_idx: value_end,
+    }
+}
+fn frame_value_at(wire: str, position: i32) -> str {
+    if position < 0 {
+        return ""
+    }
+    let mut current = 0 let mut idx = 0 while idx < str.len(wire) {
+        let next = frame_read_next(wire, idx) if current == position {
+            return next.value
+        }
+        current = current + 1 idx = next.next_idx
+    }
+    return ""
+}
+fn i32_field(wire: str, position: i32) -> i32 {
+    return model.artifacts.parse_i32(frame_value_at(wire, position))
+}
+fn str_field(wire: str, position: i32) -> str {
+    return frame_value_at(wire, position)
+}
+fn count_tiers(shape: model.EngineShape, manager: runtime.block_manager.ManagedSession) -> TierCounts {
+    let pool = runtime.block_manager.pool_of(manager) let mut hot_pages = 0 let mut warm_pages = 0 let mut cold_pages = 0 let mut late_protected_pages = 0 let mut layer_id = 0 while layer_id < shape.layer_count {
+        let table_refs_wire = runtime.block_manager.table_segment(manager.layer_tables_wire, layer_id) let mut logical_block_id = 0 while logical_block_id < kv.logical_block_table.refs_len(table_refs_wire) {
+            let reference = kv.logical_block_table.ref_at_from_refs(table_refs_wire, logical_block_id) let entry = kv.physical_block_pool.block_at(pool, reference.physical_block_id) if entry.is_hot == 1 {
+                hot_pages = hot_pages + 1
+            } else if kv.physical_block_pool.k_precision_of(entry) == kv.kv_page.Precision::Dropped {
+                if kv.physical_block_pool.v_precision_of(entry) == kv.kv_page.Precision::Dropped {
+                    cold_pages = cold_pages + 1
+                } else {
+                    warm_pages = warm_pages + 1
+                }
+            } else {
+                warm_pages = warm_pages + 1
+            }
+            if kv.physical_block_pool.role_of(entry) == kv.kv_page.PageRole::LateLayerProtected {
+                late_protected_pages = late_protected_pages + 1
+            }
+            logical_block_id = logical_block_id + 1
+        }
+        layer_id = layer_id + 1
+    }
+    return TierCounts {
+        hot_pages: hot_pages, warm_pages: warm_pages, cold_pages: cold_pages, late_protected_pages: late_protected_pages,
+    }
+}
+fn effective_bytes_per_token(hot_bytes: i32, warm_bytes: i32, state: runtime.session.SessionState) -> i32 {
+    if state.total_tokens <= 0 {
+        return 0
+    }
+    return(hot_bytes + warm_bytes) / state.total_tokens
+}
+fn memory_report(shape: model.EngineShape, manager: runtime.block_manager.ManagedSession) -> PoolMemoryReport {
+    let pool = runtime.block_manager.pool_of(manager) let mut hot_bytes = 0 let mut warm_bytes = 0 let mut cold_bytes = 0 let mut layer_id = 0 while layer_id < shape.layer_count {
+        let table_refs_wire = runtime.block_manager.table_segment(manager.layer_tables_wire, layer_id) let mut logical_block_id = 0 while logical_block_id < kv.logical_block_table.refs_len(table_refs_wire) {
+            let reference = kv.logical_block_table.ref_at_from_refs(table_refs_wire, logical_block_id) let block = kv.physical_block_pool.block_at(pool, reference.physical_block_id) if block.is_hot == 1 {
+                hot_bytes = hot_bytes + kv.physical_block_pool.encoded_bytes(shape, block)
+            } else if kv.physical_block_pool.k_precision_of(block) == kv.kv_page.Precision::Dropped {
+                if kv.physical_block_pool.v_precision_of(block) == kv.kv_page.Precision::Dropped {
+                    cold_bytes = cold_bytes + kv.physical_block_pool.raw_equivalent_bytes(shape, block)
+                } else {
+                    warm_bytes = warm_bytes + kv.physical_block_pool.encoded_bytes(shape, block)
+                }
+            } else {
+                warm_bytes = warm_bytes + kv.physical_block_pool.encoded_bytes(shape, block)
+            }
+            logical_block_id = logical_block_id + 1
+        }
+        layer_id = layer_id + 1
+    }
+    return PoolMemoryReport {
+        hot_bytes: hot_bytes, warm_bytes: warm_bytes, cold_bytes: cold_bytes,
+    }
+}
+fn shared_block_count(manager: runtime.block_manager.ManagedSession) -> i32 {
+    let pool = runtime.block_manager.pool_of(manager) let mut count = 0 let mut physical_block_id = 0 while physical_block_id < kv.physical_block_pool.blocks_len(manager.pool_blocks_wire) {
+        let block = kv.physical_block_pool.block_at(pool, physical_block_id) if block.refcount > 0 {
+            if block.is_shared == 1 {
+                count = count + 1
+            }
+        }
+        physical_block_id = physical_block_id + 1
+    }
+    return count
+}
+fn precision_census(manager: runtime.block_manager.ManagedSession) -> PrecisionCensus {
+    let pool = runtime.block_manager.pool_of(manager) let mut raw_k_pages = 0 let mut int8_k_pages = 0 let mut int4_k_pages = 0 let mut dropped_k_pages = 0 let mut raw_v_pages = 0 let mut int8_v_pages = 0 let mut int4_v_pages = 0 let mut dropped_v_pages = 0 let mut physical_block_id = 0 while physical_block_id < kv.physical_block_pool.blocks_len(manager.pool_blocks_wire) {
+        let block = kv.physical_block_pool.block_at(pool, physical_block_id) if block.refcount > 0 {
+            if kv.physical_block_pool.k_precision_of(block) == kv.kv_page.Precision::Raw {
+                raw_k_pages = raw_k_pages + 1
+            } else if kv.physical_block_pool.k_precision_of(block) == kv.kv_page.Precision::Int8 {
+                int8_k_pages = int8_k_pages + 1
+            } else if kv.physical_block_pool.k_precision_of(block) == kv.kv_page.Precision::Int4 {
+                int4_k_pages = int4_k_pages + 1
+            } else {
+                dropped_k_pages = dropped_k_pages + 1
+            }
+            if kv.physical_block_pool.v_precision_of(block) == kv.kv_page.Precision::Raw {
+                raw_v_pages = raw_v_pages + 1
+            } else if kv.physical_block_pool.v_precision_of(block) == kv.kv_page.Precision::Int8 {
+                int8_v_pages = int8_v_pages + 1
+            } else if kv.physical_block_pool.v_precision_of(block) == kv.kv_page.Precision::Int4 {
+                int4_v_pages = int4_v_pages + 1
+            } else {
+                dropped_v_pages = dropped_v_pages + 1
+            }
+        }
+        physical_block_id = physical_block_id + 1
+    }
+    return PrecisionCensus {
+        raw_k_pages: raw_k_pages, int8_k_pages: int8_k_pages, int4_k_pages: int4_k_pages, dropped_k_pages: dropped_k_pages, raw_v_pages: raw_v_pages, int8_v_pages: int8_v_pages, int4_v_pages: int4_v_pages, dropped_v_pages: dropped_v_pages,
+    }
+}
+fn trace_enabled() -> i32 {
+    if env.get("FPA_TRACE_RUNTIME") == "1" {
+        return 1
+    }
+    return 0
+}
+fn trace_line(label: str) {
+    if trace_enabled() == 1 {
+        discard term.write(str.concat(str.concat("FPA_TRACE_RESIDENCY ", label), "\n"))
+    }
+}
+fn trace_manager_snapshot(manager: runtime.block_manager.ManagedSession) {
+    if trace_enabled() == 1 {
+        let first_table_wire = runtime.block_manager.table_segment(manager.layer_tables_wire, 0) let first_ref = kv.logical_block_table.ref_segment_from_refs(first_table_wire, 0) discard term.write(str.concat(str.concat(str.concat(str.concat(str.concat("FPA_TRACE_RESIDENCY layer_tables_len=", str.from_i32(str.len(manager.layer_tables_wire))), str.concat(" table_count=", str.from_i32(runtime.block_manager.table_count(manager.layer_tables_wire)))), str.concat(" first_table_len=", str.from_i32(str.len(first_table_wire)))), str.concat(" first_refs_len=", str.from_i32(kv.logical_block_table.refs_len(first_table_wire)))), str.concat(str.concat(" first_ref=", first_ref), "\n")))
+    }
+}
+fn report_wire(shape: model.EngineShape, cfg: runtime.session.SessionConfig, state: runtime.session.SessionState) -> str {
+    return report_wire_with_manager(shape, cfg, state, runtime.session.manager_of(shape, cfg.policy_name, state))
+}
+fn report_wire_with_manager(shape: model.EngineShape, cfg: runtime.session.SessionConfig, state: runtime.session.SessionState, manager: runtime.block_manager.ManagedSession) -> str {
+    let pool = runtime.block_manager.pool_of(manager) trace_manager_snapshot(manager) let mem = memory_report(shape, manager) let counts = count_tiers(shape, manager) let precisions = precision_census(manager) let first_table_wire = runtime.block_manager.table_segment(manager.layer_tables_wire, 0) let first_ref = kv.logical_block_table.ref_at_from_refs(first_table_wire, 0) let first_page = kv.physical_block_pool.block_at(pool, first_ref.physical_block_id) let last_page_id = if state.used_pages > 0 {
+        state.used_pages - 1
+    } else {
+        0
+    }
+    let last_table_wire = runtime.block_manager.table_segment(manager.layer_tables_wire, shape.layer_count - 1) let last_ref = kv.logical_block_table.ref_at_from_refs(last_table_wire, last_page_id) let last_page = kv.physical_block_pool.block_at(pool, last_ref.physical_block_id) let mut wire = "" wire = frame_push(wire, cfg.model_dir) wire = frame_push(wire, cfg.policy_name) wire = frame_push(wire, str.from_i32(state.prompt_tokens)) wire = frame_push(wire, str.from_i32(state.decode_tokens)) wire = frame_push(wire, str.from_i32(state.total_tokens)) wire = frame_push(wire, str.from_i32(state.prefill_pages)) wire = frame_push(wire, str.from_i32(state.decode_pages)) wire = frame_push(wire, str.from_i32(state.used_pages)) wire = frame_push(wire, str.from_i32(state.tail_page_tokens)) wire = frame_push(wire, str.from_i32(cfg.hot_budget_pct)) wire = frame_push(wire, str.from_i32(state.hot_pages)) wire = frame_push(wire, str.from_i32(state.recent_start_page)) wire = frame_push(wire, str.from_i32(counts.hot_pages)) wire = frame_push(wire, str.from_i32(counts.warm_pages)) wire = frame_push(wire, str.from_i32(counts.cold_pages)) wire = frame_push(wire, str.from_i32(counts.late_protected_pages)) wire = frame_push(wire, str.from_i32(mem.hot_bytes)) wire = frame_push(wire, str.from_i32(mem.warm_bytes)) wire = frame_push(wire, str.from_i32(mem.cold_bytes)) wire = frame_push(wire, str.from_i32(effective_bytes_per_token(mem.hot_bytes, mem.warm_bytes, state))) wire = frame_push(wire, str.from_i32(manager.block_remaps)) wire = frame_push(wire, str.from_i32(manager.copy_on_write_count)) wire = frame_push(wire, str.from_i32(shared_block_count(manager))) wire = frame_push(wire, str.from_i32(precisions.raw_k_pages)) wire = frame_push(wire, str.from_i32(precisions.int8_k_pages)) wire = frame_push(wire, str.from_i32(precisions.int4_k_pages)) wire = frame_push(wire, str.from_i32(precisions.dropped_k_pages)) wire = frame_push(wire, str.from_i32(precisions.raw_v_pages)) wire = frame_push(wire, str.from_i32(precisions.int8_v_pages)) wire = frame_push(wire, str.from_i32(precisions.int4_v_pages)) wire = frame_push(wire, str.from_i32(precisions.dropped_v_pages)) wire = frame_push(wire, first_page.k_precision_name) wire = frame_push(wire, first_page.v_precision_name) wire = frame_push(wire, last_page.k_precision_name) wire = frame_push(wire, last_page.v_precision_name) return wire
+}
+fn report(shape: model.EngineShape, cfg: runtime.session.SessionConfig, state: runtime.session.SessionState) -> SessionResidencyReport {
+    return report_from_wire(report_wire(shape, cfg, state))
+}
+fn report_from_wire(wire: str) -> SessionResidencyReport {
+    return SessionResidencyReport {
+        model_dir: str_field(wire, 0), policy_name: str_field(wire, 1), prompt_tokens: i32_field(wire, 2), decode_tokens: i32_field(wire, 3), total_tokens: i32_field(wire, 4), prefill_pages: i32_field(wire, 5), decode_pages: i32_field(wire, 6), used_pages: i32_field(wire, 7), tail_page_tokens: i32_field(wire, 8), hot_budget_pct: i32_field(wire, 9), hot_pages: i32_field(wire, 10), recent_start_page: i32_field(wire, 11), hot_layer_pages: i32_field(wire, 12), warm_layer_pages: i32_field(wire, 13), cold_layer_pages: i32_field(wire, 14), late_protected_layer_pages: i32_field(wire, 15), hot_bytes: i32_field(wire, 16), warm_bytes: i32_field(wire, 17), cold_bytes: i32_field(wire, 18), effective_bytes_per_token: i32_field(wire, 19), block_remap_count: i32_field(wire, 20), copy_on_write_count: i32_field(wire, 21), shared_block_count: i32_field(wire, 22), raw_k_pages: i32_field(wire, 23), int8_k_pages: i32_field(wire, 24), int4_k_pages: i32_field(wire, 25), dropped_k_pages: i32_field(wire, 26), raw_v_pages: i32_field(wire, 27), int8_v_pages: i32_field(wire, 28), int4_v_pages: i32_field(wire, 29), dropped_v_pages: i32_field(wire, 30), first_page_k_precision: str_field(wire, 31), first_page_v_precision: str_field(wire, 32), last_page_k_precision: str_field(wire, 33), last_page_v_precision: str_field(wire, 34),
+    }
+}
+fn report_json_from_wire(wire: str) -> str {
+    let payload = map.new() discard map.set(payload, "model_dir", json.str(str_field(wire, 0))) discard map.set(payload, "policy", json.str(str_field(wire, 1))) discard map.set(payload, "prompt_tokens", model.json_emit.raw(str_field(wire, 2))) discard map.set(payload, "decode_tokens", model.json_emit.raw(str_field(wire, 3))) discard map.set(payload, "total_tokens", model.json_emit.raw(str_field(wire, 4))) discard map.set(payload, "prefill_pages", model.json_emit.raw(str_field(wire, 5))) discard map.set(payload, "decode_pages", model.json_emit.raw(str_field(wire, 6))) discard map.set(payload, "used_pages", model.json_emit.raw(str_field(wire, 7))) discard map.set(payload, "tail_page_tokens", model.json_emit.raw(str_field(wire, 8))) discard map.set(payload, "hot_budget_pct", model.json_emit.raw(str_field(wire, 9))) discard map.set(payload, "hot_pages", model.json_emit.raw(str_field(wire, 10))) discard map.set(payload, "recent_start_page", model.json_emit.raw(str_field(wire, 11))) discard map.set(payload, "hot_layer_pages", model.json_emit.raw(str_field(wire, 12))) discard map.set(payload, "warm_layer_pages", model.json_emit.raw(str_field(wire, 13))) discard map.set(payload, "cold_layer_pages", model.json_emit.raw(str_field(wire, 14))) discard map.set(payload, "late_protected_layer_pages", model.json_emit.raw(str_field(wire, 15))) discard map.set(payload, "hot_bytes", model.json_emit.raw(str_field(wire, 16))) discard map.set(payload, "warm_bytes", model.json_emit.raw(str_field(wire, 17))) discard map.set(payload, "cold_bytes", model.json_emit.raw(str_field(wire, 18))) discard map.set(payload, "effective_bytes_per_token", model.json_emit.raw(str_field(wire, 19))) discard map.set(payload, "block_remap_count", model.json_emit.raw(str_field(wire, 20))) discard map.set(payload, "copy_on_write_count", model.json_emit.raw(str_field(wire, 21))) discard map.set(payload, "shared_block_count", model.json_emit.raw(str_field(wire, 22))) discard map.set(payload, "raw_k_pages", model.json_emit.raw(str_field(wire, 23))) discard map.set(payload, "int8_k_pages", model.json_emit.raw(str_field(wire, 24))) discard map.set(payload, "int4_k_pages", model.json_emit.raw(str_field(wire, 25))) discard map.set(payload, "dropped_k_pages", model.json_emit.raw(str_field(wire, 26))) discard map.set(payload, "raw_v_pages", model.json_emit.raw(str_field(wire, 27))) discard map.set(payload, "int8_v_pages", model.json_emit.raw(str_field(wire, 28))) discard map.set(payload, "int4_v_pages", model.json_emit.raw(str_field(wire, 29))) discard map.set(payload, "dropped_v_pages", model.json_emit.raw(str_field(wire, 30))) discard map.set(payload, "first_page_k_precision", json.str(str_field(wire, 31))) discard map.set(payload, "first_page_v_precision", json.str(str_field(wire, 32))) discard map.set(payload, "last_page_k_precision", json.str(str_field(wire, 33))) discard map.set(payload, "last_page_v_precision", json.str(str_field(wire, 34))) return json.object(payload)
+}
+fn report_json(report: SessionResidencyReport) -> str {
+    return report_json_from_wire(report_wire_from_report(report))
+}
+fn report_wire_from_report(report: SessionResidencyReport) -> str {
+    let mut wire = "" wire = frame_push(wire, report.model_dir) wire = frame_push(wire, report.policy_name) wire = frame_push(wire, str.from_i32(report.prompt_tokens)) wire = frame_push(wire, str.from_i32(report.decode_tokens)) wire = frame_push(wire, str.from_i32(report.total_tokens)) wire = frame_push(wire, str.from_i32(report.prefill_pages)) wire = frame_push(wire, str.from_i32(report.decode_pages)) wire = frame_push(wire, str.from_i32(report.used_pages)) wire = frame_push(wire, str.from_i32(report.tail_page_tokens)) wire = frame_push(wire, str.from_i32(report.hot_budget_pct)) wire = frame_push(wire, str.from_i32(report.hot_pages)) wire = frame_push(wire, str.from_i32(report.recent_start_page)) wire = frame_push(wire, str.from_i32(report.hot_layer_pages)) wire = frame_push(wire, str.from_i32(report.warm_layer_pages)) wire = frame_push(wire, str.from_i32(report.cold_layer_pages)) wire = frame_push(wire, str.from_i32(report.late_protected_layer_pages)) wire = frame_push(wire, str.from_i32(report.hot_bytes)) wire = frame_push(wire, str.from_i32(report.warm_bytes)) wire = frame_push(wire, str.from_i32(report.cold_bytes)) wire = frame_push(wire, str.from_i32(report.effective_bytes_per_token)) wire = frame_push(wire, str.from_i32(report.block_remap_count)) wire = frame_push(wire, str.from_i32(report.copy_on_write_count)) wire = frame_push(wire, str.from_i32(report.shared_block_count)) wire = frame_push(wire, str.from_i32(report.raw_k_pages)) wire = frame_push(wire, str.from_i32(report.int8_k_pages)) wire = frame_push(wire, str.from_i32(report.int4_k_pages)) wire = frame_push(wire, str.from_i32(report.dropped_k_pages)) wire = frame_push(wire, str.from_i32(report.raw_v_pages)) wire = frame_push(wire, str.from_i32(report.int8_v_pages)) wire = frame_push(wire, str.from_i32(report.int4_v_pages)) wire = frame_push(wire, str.from_i32(report.dropped_v_pages)) wire = frame_push(wire, report.first_page_k_precision) wire = frame_push(wire, report.first_page_v_precision) wire = frame_push(wire, report.last_page_k_precision) wire = frame_push(wire, report.last_page_v_precision) return wire
+}
+fn report_json_from(shape: model.EngineShape, cfg: runtime.session.SessionConfig, state: runtime.session.SessionState) -> str {
+    return report_json_from_wire(report_wire(shape, cfg, state))
+}
+fn block_remap_count_from_wire(wire: str) -> i32 { return i32_field(wire, 20) }
+fn copy_on_write_count_from_wire(wire: str) -> i32 { return i32_field(wire, 21) }

@@ -1,0 +1,9 @@
+use kv;
+struct ShareResult {
+    pool: kv.physical_block_pool.PhysicalBlockPool, table: kv.logical_block_table.LogicalBlockTable,
+}
+fn share_mapping(pool: kv.physical_block_pool.PhysicalBlockPool, table: kv.logical_block_table.LogicalBlockTable, physical_block_id: i32, token_count: i32) -> ShareResult {
+    let next_pool = kv.physical_block_pool.increment_refcount(pool, physical_block_id) let marked = kv.physical_block_pool.set_shared_immutable(next_pool, physical_block_id, 1, 1) return ShareResult {
+        pool: marked, table: kv.logical_block_table.append_mapping(table, physical_block_id, token_count),
+    }
+}

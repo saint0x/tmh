@@ -1,0 +1,615 @@
+use core.env;
+use kv;
+use model;
+use runtime.cow;
+use runtime.tmh_plan;
+struct ManagedSession {
+    pool_blocks_wire: str, pool_free_ids_wire: str, pool_next_block_id: i32, pool_live_blocks: i32, pool_total_allocations: i32, pool_total_frees: i32, layer_tables_wire: str, used_blocks: i32, hot_blocks: i32, recent_start_block: i32, block_remaps: i32, copy_on_write_count: i32,
+}
+struct DemotionResult {
+    pool: kv.physical_block_pool.PhysicalBlockPool, table: kv.logical_block_table.LogicalBlockTable, remapped: i32,
+}
+struct AppendResult {
+    manager: ManagedSession, used_blocks: i32, tail_block_tokens: i32,
+}
+fn build_empty() -> ManagedSession {
+    return ManagedSession {
+        pool_blocks_wire: "", pool_free_ids_wire: "", pool_next_block_id: 0, pool_live_blocks: 0, pool_total_allocations: 0, pool_total_frees: 0, layer_tables_wire: "", used_blocks: 0, hot_blocks: 0, recent_start_block: 0, block_remaps: 0, copy_on_write_count: 0,
+    }
+}
+fn frame_push(wire: str, value: str) -> str {
+    return str.concat(str.concat(str.concat(wire, str.from_i32(str.len(value))), "#"), value)
+}
+fn frame_sep(wire: str, start: i32) -> i32 {
+    let mut idx = start while idx < str.len(wire) {
+        if str.slice(wire, idx, idx + 1) == "#" {
+            return idx
+        }
+        idx = idx + 1
+    }
+    return - 1
+}
+fn frame_value_at(wire: str, position: i32) -> str {
+    if position < 0 {
+        return ""
+    }
+    let mut current = 0 let mut idx = 0 while idx < str.len(wire) {
+        let sep = frame_sep(wire, idx) if sep < 0 {
+            return ""
+        }
+        let size = model.artifacts.parse_i32(str.slice(wire, idx, sep)) let start = sep + 1 let end = start + size if current == position {
+            return str.slice(wire, start, end)
+        }
+        idx = end current = current + 1
+    }
+    return ""
+}
+fn trace_enabled() -> i32 {
+    if env.get("FPA_TRACE_RUNTIME") == "1" {
+        return 1
+    }
+    return 0
+}
+fn trace_manager_pool(label: str, manager_state_wire: str) {
+    if trace_enabled() == 1 {
+        let manager = manager_from_manager_wire(manager_state_wire) let first_block_wire = kv.physical_block_pool.block_segment(manager.pool_blocks_wire, 0) discard term.write(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat("FPA_TRACE_POOL label=", label), str.concat(" blocks_wire_len=", str.from_i32(str.len(manager.pool_blocks_wire)))), str.concat(" blocks_count=", str.from_i32(kv.physical_block_pool.blocks_len(manager.pool_blocks_wire)))), str.concat(" tables_count=", str.from_i32(table_count(manager.layer_tables_wire)))), str.concat(" first_block_len=", str.from_i32(str.len(first_block_wire)))), "\n"))
+    }
+}
+fn pool_of(manager: ManagedSession) -> kv.physical_block_pool.PhysicalBlockPool {
+    return kv.physical_block_pool.from_wire(manager.pool_blocks_wire, manager.pool_free_ids_wire, manager.pool_next_block_id, manager.pool_live_blocks, manager.pool_total_allocations, manager.pool_total_frees,)
+}
+fn with_pool(manager: ManagedSession, pool: kv.physical_block_pool.PhysicalBlockPool) -> ManagedSession {
+    return ManagedSession {
+        pool_blocks_wire: pool.blocks_wire, pool_free_ids_wire: pool.free_ids_wire, pool_next_block_id: pool.next_block_id, pool_live_blocks: pool.live_blocks, pool_total_allocations: pool.total_allocations, pool_total_frees: pool.total_frees, layer_tables_wire: manager.layer_tables_wire, used_blocks: manager.used_blocks, hot_blocks: manager.hot_blocks, recent_start_block: manager.recent_start_block, block_remaps: manager.block_remaps, copy_on_write_count: manager.copy_on_write_count,
+    }
+}
+fn manager_wire(manager: ManagedSession) -> str {
+    let mut wire = "" wire = frame_push(wire, manager.pool_blocks_wire) wire = frame_push(wire, manager.pool_free_ids_wire) wire = frame_push(wire, str.from_i32(manager.pool_next_block_id)) wire = frame_push(wire, str.from_i32(manager.pool_live_blocks)) wire = frame_push(wire, str.from_i32(manager.pool_total_allocations)) wire = frame_push(wire, str.from_i32(manager.pool_total_frees)) wire = frame_push(wire, manager.layer_tables_wire) wire = frame_push(wire, str.from_i32(manager.used_blocks)) wire = frame_push(wire, str.from_i32(manager.hot_blocks)) wire = frame_push(wire, str.from_i32(manager.recent_start_block)) wire = frame_push(wire, str.from_i32(manager.block_remaps)) wire = frame_push(wire, str.from_i32(manager.copy_on_write_count)) return wire
+}
+fn manager_wire_from_fields(pool_blocks_wire: str, pool_free_ids_wire: str, pool_next_block_id: i32, pool_live_blocks: i32, pool_total_allocations: i32, pool_total_frees: i32, layer_tables_wire: str, used_blocks: i32, hot_blocks: i32, recent_start_block: i32, block_remaps: i32, copy_on_write_count: i32) -> str {
+    let mut wire = "" wire = frame_push(wire, pool_blocks_wire) wire = frame_push(wire, pool_free_ids_wire) wire = frame_push(wire, str.from_i32(pool_next_block_id)) wire = frame_push(wire, str.from_i32(pool_live_blocks)) wire = frame_push(wire, str.from_i32(pool_total_allocations)) wire = frame_push(wire, str.from_i32(pool_total_frees)) wire = frame_push(wire, layer_tables_wire) wire = frame_push(wire, str.from_i32(used_blocks)) wire = frame_push(wire, str.from_i32(hot_blocks)) wire = frame_push(wire, str.from_i32(recent_start_block)) wire = frame_push(wire, str.from_i32(block_remaps)) wire = frame_push(wire, str.from_i32(copy_on_write_count)) return wire
+}
+fn append_wire(append: AppendResult) -> str {
+    let mut wire = "" wire = frame_push(wire, manager_wire(append.manager)) wire = frame_push(wire, str.from_i32(append.used_blocks)) wire = frame_push(wire, str.from_i32(append.tail_block_tokens)) return wire
+}
+fn append_result_wire(manager: ManagedSession, used_blocks: i32, tail_block_tokens: i32) -> str {
+    let mut wire = "" wire = frame_push(wire, manager_wire(manager)) wire = frame_push(wire, str.from_i32(used_blocks)) wire = frame_push(wire, str.from_i32(tail_block_tokens)) return wire
+}
+fn append_result_wire_from_fields(pool_blocks_wire: str, pool_free_ids_wire: str, pool_next_block_id: i32, pool_live_blocks: i32, pool_total_allocations: i32, pool_total_frees: i32, layer_tables_wire: str, used_blocks: i32, hot_blocks: i32, recent_start_block: i32, block_remaps: i32, copy_on_write_count: i32, tail_block_tokens: i32) -> str {
+    let mut wire = "" wire = frame_push(wire, manager_wire_from_fields(pool_blocks_wire, pool_free_ids_wire, pool_next_block_id, pool_live_blocks, pool_total_allocations, pool_total_frees, layer_tables_wire, used_blocks, hot_blocks, recent_start_block, block_remaps, copy_on_write_count)) wire = frame_push(wire, str.from_i32(used_blocks)) wire = frame_push(wire, str.from_i32(tail_block_tokens)) return wire
+}
+fn append_from_wire(wire: str) -> AppendResult {
+    return AppendResult {
+        manager: manager_from_manager_wire(frame_value_at(wire, 0)), used_blocks: model.artifacts.parse_i32(frame_value_at(wire, 1)), tail_block_tokens: model.artifacts.parse_i32(frame_value_at(wire, 2)),
+    }
+}
+fn from_wire(blocks_wire: str, free_ids_wire: str, next_block_id: i32, live_blocks: i32, total_allocations: i32, total_frees: i32, layer_tables_wire: str, used_blocks: i32, hot_blocks: i32, recent_start_block: i32, block_remaps: i32, copy_on_write_count: i32) -> ManagedSession {
+    return ManagedSession {
+        pool_blocks_wire: blocks_wire, pool_free_ids_wire: free_ids_wire, pool_next_block_id: next_block_id, pool_live_blocks: live_blocks, pool_total_allocations: total_allocations, pool_total_frees: total_frees, layer_tables_wire: layer_tables_wire, used_blocks: used_blocks, hot_blocks: hot_blocks, recent_start_block: recent_start_block, block_remaps: block_remaps, copy_on_write_count: copy_on_write_count,
+    }
+}
+fn manager_from_manager_wire(wire: str) -> ManagedSession {
+    return from_wire(frame_value_at(wire, 0), frame_value_at(wire, 1), model.artifacts.parse_i32(frame_value_at(wire, 2)), model.artifacts.parse_i32(frame_value_at(wire, 3)), model.artifacts.parse_i32(frame_value_at(wire, 4)), model.artifacts.parse_i32(frame_value_at(wire, 5)), frame_value_at(wire, 6), model.artifacts.parse_i32(frame_value_at(wire, 7)), model.artifacts.parse_i32(frame_value_at(wire, 8)), model.artifacts.parse_i32(frame_value_at(wire, 9)), model.artifacts.parse_i32(frame_value_at(wire, 10)), model.artifacts.parse_i32(frame_value_at(wire, 11)),)
+}
+fn parse_tables(wire: str) -> ListHandle {
+    let tables = list.new() let mut idx = 0 while idx < str.len(wire) {
+        let sep = frame_sep(wire, idx) if sep < 0 {
+            return tables
+        }
+        let size = model.artifacts.parse_i32(str.slice(wire, idx, sep)) let start = sep + 1 let end = start + size discard list.push(tables, str.slice(wire, start, end)) idx = end
+    }
+    return tables
+}
+fn join_tables(tables: ListHandle) -> str {
+    let mut wire = "" let mut idx = 0 while idx < list.len(tables) {
+        wire = frame_push(wire, list.get(tables, idx)) idx = idx + 1
+    }
+    return wire
+}
+fn clone_tables_with_append(tables: ListHandle, entry: str) -> ListHandle {
+    let next = list.new() let mut idx = 0 while idx < list.len(tables) {
+        discard list.push(next, list.get(tables, idx)) idx = idx + 1
+    }
+    discard list.push(next, entry) return next
+}
+fn clone_tables_with_replace(tables: ListHandle, position: i32, entry: str) -> ListHandle {
+    let next = list.new() let mut idx = 0 while idx < list.len(tables) {
+        if idx == position {
+            discard list.push(next, entry)
+        } else {
+            discard list.push(next, list.get(tables, idx))
+        }
+        idx = idx + 1
+    }
+    return next
+}
+fn replace_table_wire(wire: str, position: i32, entry: str) -> str {
+    let mut rebuilt = "" let mut current = 0 let mut idx = 0 while idx < str.len(wire) {
+        let sep = frame_sep(wire, idx) if sep < 0 {
+            return rebuilt
+        }
+        let size = model.artifacts.parse_i32(str.slice(wire, idx, sep)) let start = sep + 1 let end = start + size let next = if current == position {
+            entry
+        } else {
+            str.slice(wire, start, end)
+        }
+        rebuilt = frame_push(rebuilt, next) idx = end current = current + 1
+    }
+    return rebuilt
+}
+fn table_json(table: kv.logical_block_table.LogicalBlockTable) -> str {
+    return table.refs_wire
+}
+fn table_at(manager: ManagedSession, layer_id: i32) -> kv.logical_block_table.LogicalBlockTable {
+    if layer_id < 0 {
+        return kv.logical_block_table.create(0, layer_id)
+    }
+    if layer_id >= table_count(manager.layer_tables_wire) {
+        return kv.logical_block_table.create(0, layer_id)
+    }
+    return kv.logical_block_table.from_refs_wire(0, layer_id, table_segment(manager.layer_tables_wire, layer_id))
+}
+fn rebuild_tables_with(manager: ManagedSession, layer_id: i32, table: kv.logical_block_table.LogicalBlockTable) -> str {
+    return replace_table_wire(manager.layer_tables_wire, layer_id, table_json(table))
+}
+fn with_table(manager: ManagedSession, layer_id: i32, table: kv.logical_block_table.LogicalBlockTable) -> ManagedSession {
+    let layer_tables_wire = rebuild_tables_with(manager, layer_id, table) return ManagedSession {
+        pool_blocks_wire: manager.pool_blocks_wire, pool_free_ids_wire: manager.pool_free_ids_wire, pool_next_block_id: manager.pool_next_block_id, pool_live_blocks: manager.pool_live_blocks, pool_total_allocations: manager.pool_total_allocations, pool_total_frees: manager.pool_total_frees, layer_tables_wire: layer_tables_wire, used_blocks: manager.used_blocks, hot_blocks: manager.hot_blocks, recent_start_block: manager.recent_start_block, block_remaps: manager.block_remaps, copy_on_write_count: manager.copy_on_write_count,
+    }
+}
+fn logical_block_is_hot(manager: ManagedSession, logical_block_id: i32) -> i32 {
+    if manager.hot_blocks <= 0 {
+        return 0
+    }
+    if logical_block_id >= manager.recent_start_block {
+        return 1
+    }
+    return 0
+}
+fn desired_role_name(shape: model.EngineShape, layer_id: i32, logical_block_id: i32, manager: ManagedSession) -> str {
+    if logical_block_is_hot(manager, logical_block_id) == 1 {
+        return "recent"
+    }
+    if layer_id >= shape.late_layer_start {
+        return "late_layer_protected"
+    }
+    return "old"
+}
+fn desired_k_precision_name(policy_name: str, logical_block_id: i32, manager: ManagedSession) -> str {
+    let _logical_block_id = logical_block_id
+    if policy_name == "full_kv" {
+        return "raw"
+    }
+    if policy_name == "paged_full_kv" {
+        return "raw"
+    }
+    if logical_block_is_hot(manager, logical_block_id) == 1 {
+        return "raw"
+    }
+    if policy_name == "recent_only" {
+        return "dropped"
+    }
+    return "int8"
+}
+fn desired_v_precision_name(policy_name: str, late_layer_start: i32, layer_id: i32, logical_block_id: i32, manager: ManagedSession) -> str {
+    if policy_name == "full_kv" {
+        return "raw"
+    }
+    if policy_name == "paged_full_kv" {
+        return "raw"
+    }
+    if logical_block_is_hot(manager, logical_block_id) == 1 {
+        return "raw"
+    }
+    if policy_name == "recent_only" {
+        return "dropped"
+    }
+    if policy_name == "quantized_old_kv" {
+        return "int8"
+    }
+    if layer_id >= late_layer_start {
+        return "int8"
+    }
+    return "int4"
+}
+fn policy_requires_remap(policy_name: str) -> i32 {
+    if policy_name == "full_kv" {
+        return 0
+    }
+    if policy_name == "paged_full_kv" {
+        return 0
+    }
+    return 1
+}
+
+fn planned_k_precision_name(compiled: runtime.tmh_plan.TMHMemoryPlan, policy_name: str, logical_block_id: i32, layer_id: i32, manager: ManagedSession) -> str {
+    let planned = runtime.tmh_plan.range_for(compiled, layer_id, logical_block_id) if planned.authority != "" {
+        return planned.k_precision_name
+    }
+    return desired_k_precision_name(policy_name, logical_block_id, manager)
+}
+
+fn planned_v_precision_name(shape: model.EngineShape, compiled: runtime.tmh_plan.TMHMemoryPlan, policy_name: str, logical_block_id: i32, layer_id: i32, manager: ManagedSession) -> str {
+    let planned = runtime.tmh_plan.range_for(compiled, layer_id, logical_block_id) if planned.authority != "" {
+        return planned.v_precision_name
+    }
+    return desired_v_precision_name(policy_name, shape.late_layer_start, layer_id, logical_block_id, manager)
+}
+
+fn planned_role_name(shape: model.EngineShape, compiled: runtime.tmh_plan.TMHMemoryPlan, logical_block_id: i32, layer_id: i32, manager: ManagedSession) -> str {
+    let planned = runtime.tmh_plan.range_for(compiled, layer_id, logical_block_id) if planned.authority != "" {
+        if planned.pin == 1 {
+            return "pinned"
+        }
+        if planned.residency_tier == "hot" {
+            return "recent"
+        }
+        if planned.semantic_class == "late_layer_payload" {
+            return "late_layer_protected"
+        }
+        return "old"
+    }
+    return desired_role_name(shape, layer_id, logical_block_id, manager)
+}
+
+fn planned_is_hot(compiled: runtime.tmh_plan.TMHMemoryPlan, logical_block_id: i32, layer_id: i32, manager: ManagedSession) -> i32 {
+    let planned = runtime.tmh_plan.range_for(compiled, layer_id, logical_block_id) if planned.authority != "" {
+        if planned.residency_tier == "hot" {
+            return 1
+        }
+        return 0
+    }
+    return logical_block_is_hot(manager, logical_block_id)
+}
+fn normalize_raw_policy_layout(shape: model.EngineShape, hot_budget_pct: i32, policy_name: str, manager: ManagedSession) -> ManagedSession {
+    if trace_enabled() == 1 {
+        discard term.write("FPA_TRACE_APPEND normalize_begin\n")
+    }
+    let runtime_cfg = model.artifacts.runtime_config_for_policy_name_active(shape, hot_budget_pct, policy_name, manager.used_blocks) let recent_start_block = if runtime_cfg.hot_pages >= manager.used_blocks {
+        0
+    } else {
+        manager.used_blocks - runtime_cfg.hot_pages
+    }
+    return ManagedSession {
+        pool_blocks_wire: manager.pool_blocks_wire, pool_free_ids_wire: manager.pool_free_ids_wire, pool_next_block_id: manager.pool_next_block_id, pool_live_blocks: manager.pool_live_blocks, pool_total_allocations: manager.pool_total_allocations, pool_total_frees: manager.pool_total_frees, layer_tables_wire: manager.layer_tables_wire, used_blocks: manager.used_blocks, hot_blocks: runtime_cfg.hot_pages, recent_start_block: recent_start_block, block_remaps: manager.block_remaps, copy_on_write_count: manager.copy_on_write_count,
+    }
+}
+fn build_layer_table(shape: model.EngineShape, layer_id: i32, used_blocks: i32, tail_block_tokens: i32, manager: ManagedSession) -> ManagedSession {
+    let mut table = kv.logical_block_table.create(0, layer_id) let mut pool = pool_of(manager) let mut logical_block_id = 0 while logical_block_id < used_blocks {
+        let token_count = if logical_block_id < used_blocks - 1 {
+            shape.page_tokens
+        } else {
+            tail_block_tokens
+        }
+        let alloc = kv.physical_block_pool.allocate(pool, layer_id, logical_block_id * shape.page_tokens, token_count, "raw", "raw", desired_role_name(shape, layer_id, logical_block_id, manager), logical_block_is_hot(manager, logical_block_id), 0, 0, 0,) pool = kv.physical_block_pool.increment_refcount(alloc.pool, alloc.physical_block_id) table = kv.logical_block_table.append_mapping(table, alloc.physical_block_id, token_count) logical_block_id = logical_block_id + 1
+    }
+    let tables = frame_push(manager.layer_tables_wire, table_json(table)) return ManagedSession {
+        pool_blocks_wire: pool.blocks_wire, pool_free_ids_wire: pool.free_ids_wire, pool_next_block_id: pool.next_block_id, pool_live_blocks: pool.live_blocks, pool_total_allocations: pool.total_allocations, pool_total_frees: pool.total_frees, layer_tables_wire: tables, used_blocks: manager.used_blocks, hot_blocks: manager.hot_blocks, recent_start_block: manager.recent_start_block, block_remaps: manager.block_remaps, copy_on_write_count: manager.copy_on_write_count,
+    }
+}
+fn build_layer_table_wire(shape: model.EngineShape, layer_id: i32, used_blocks: i32, tail_block_tokens: i32, manager_state_wire: str) -> str {
+    let manager = manager_from_manager_wire(manager_state_wire) let mut table = kv.logical_block_table.create(0, layer_id) let mut pool = pool_of(manager) let mut logical_block_id = 0 while logical_block_id < used_blocks {
+        let token_count = if logical_block_id < used_blocks - 1 {
+            shape.page_tokens
+        } else {
+            tail_block_tokens
+        }
+        let alloc = kv.physical_block_pool.allocate(pool, layer_id, logical_block_id * shape.page_tokens, token_count, "raw", "raw", desired_role_name(shape, layer_id, logical_block_id, manager), logical_block_is_hot(manager, logical_block_id), 0, 0, 0,) pool = kv.physical_block_pool.increment_refcount(alloc.pool, alloc.physical_block_id) table = kv.logical_block_table.append_mapping(table, alloc.physical_block_id, token_count) logical_block_id = logical_block_id + 1
+    }
+    if trace_enabled() == 1 {
+        discard term.write(str.concat(str.concat(str.concat(str.concat(str.concat("FPA_TRACE_POOL_BUILD layer=", str.from_i32(layer_id)), str.concat(" pool_blocks_wire_len=", str.from_i32(str.len(pool.blocks_wire)))), str.concat(" pool_blocks_count=", str.from_i32(kv.physical_block_pool.blocks_len(pool.blocks_wire)))), str.concat(" first_block_len=", str.from_i32(str.len(kv.physical_block_pool.block_segment(pool.blocks_wire, 0))))), "\n"))
+    }
+    let tables = frame_push(manager.layer_tables_wire, table_json(table)) return manager_wire(ManagedSession {
+        pool_blocks_wire: pool.blocks_wire, pool_free_ids_wire: pool.free_ids_wire, pool_next_block_id: pool.next_block_id, pool_live_blocks: pool.live_blocks, pool_total_allocations: pool.total_allocations, pool_total_frees: pool.total_frees, layer_tables_wire: tables, used_blocks: manager.used_blocks, hot_blocks: manager.hot_blocks, recent_start_block: manager.recent_start_block, block_remaps: manager.block_remaps, copy_on_write_count: manager.copy_on_write_count,
+    }
+    )
+}
+fn demote_layer_wire(shape: model.EngineShape, policy_name: str, layer_id: i32, manager_state_wire: str) -> str {
+    let manager = manager_from_manager_wire(manager_state_wire) let mut pool = pool_of(manager) let mut table = table_at(manager, layer_id) let mut remapped = 0 let mut logical_block_id = 0 while logical_block_id < kv.logical_block_table.len(table) {
+        let desired_k = desired_k_precision_name(policy_name, logical_block_id, manager) let desired_v = desired_v_precision_name(policy_name, shape.late_layer_start, layer_id, logical_block_id, manager) let desired_role = desired_role_name(shape, layer_id, logical_block_id, manager) let reference = kv.logical_block_table.ref_at(table, logical_block_id) let current = kv.physical_block_pool.block_at(pool, reference.physical_block_id) let mut should_remap = 0 if current.k_precision_name != desired_k {
+            should_remap = 1
+        }
+        if current.v_precision_name != desired_v {
+            should_remap = 1
+        }
+        if current.role_name != desired_role {
+            should_remap = 1
+        }
+        if current.is_hot != logical_block_is_hot(manager, logical_block_id) {
+            should_remap = 1
+        }
+        if should_remap == 1 {
+            if trace_enabled() == 1 {
+                discard term.write(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat("FPA_TRACE_DEMOTE layer=", str.from_i32(layer_id)), str.concat(" logical_block=", str.from_i32(logical_block_id))), str.concat(" current_k=", current.k_precision_name)), str.concat(" current_v=", current.v_precision_name)), str.concat(str.concat(" desired_k=", desired_k), str.concat(" desired_v=", desired_v))), str.concat(str.concat(str.concat(" current_role=", current.role_name), str.concat(" desired_role=", desired_role)), str.concat(str.concat(" current_hot=", str.from_i32(current.is_hot)), str.concat(str.concat(" desired_hot=", str.from_i32(logical_block_is_hot(manager, logical_block_id))), "\n")))))
+            }
+            let replacement = kv.physical_block_pool.allocate(pool, layer_id, current.start_token, current.token_count, desired_k, desired_v, desired_role, logical_block_is_hot(manager, logical_block_id), 0, if logical_block_is_hot(manager, logical_block_id) == 1 {
+                0
+            } else {
+                1
+            }
+            , current.generation + 1,) table = kv.logical_block_table.replace_mapping(table, logical_block_id, replacement.physical_block_id, reference.token_count) pool = kv.physical_block_pool.increment_refcount(replacement.pool, replacement.physical_block_id) pool = kv.physical_block_pool.decrement_refcount(pool, current.physical_block_id) remapped = remapped + 1
+        }
+        logical_block_id = logical_block_id + 1
+    }
+    let layer_tables_wire = rebuild_tables_with(manager, layer_id, table) return manager_wire(ManagedSession {
+        pool_blocks_wire: pool.blocks_wire, pool_free_ids_wire: pool.free_ids_wire, pool_next_block_id: pool.next_block_id, pool_live_blocks: pool.live_blocks, pool_total_allocations: pool.total_allocations, pool_total_frees: pool.total_frees, layer_tables_wire: layer_tables_wire, used_blocks: manager.used_blocks, hot_blocks: manager.hot_blocks, recent_start_block: manager.recent_start_block, block_remaps: manager.block_remaps + remapped, copy_on_write_count: manager.copy_on_write_count,
+    }
+    )
+}
+fn demote_layer(shape: model.EngineShape, policy_name: str, layer_id: i32, manager: ManagedSession) -> DemotionResult {
+    let mut pool = pool_of(manager) let mut table = table_at(manager, layer_id) let mut remapped = 0 let mut logical_block_id = 0 while logical_block_id < kv.logical_block_table.len(table) {
+        if trace_enabled() == 1 {
+            discard term.write(str.concat(str.concat(str.concat(str.concat("FPA_TRACE_DEMOTE_LAYER policy=", policy_name), str.concat(" layer_id=", str.from_i32(layer_id))), str.concat(" logical_block_id=", str.from_i32(logical_block_id))), "\n"))
+        }
+        let desired_k = desired_k_precision_name(policy_name, logical_block_id, manager) let desired_v = desired_v_precision_name(policy_name, shape.late_layer_start, layer_id, logical_block_id, manager) let desired_role = desired_role_name(shape, layer_id, logical_block_id, manager) let reference = kv.logical_block_table.ref_at(table, logical_block_id) let current = kv.physical_block_pool.block_at(pool, reference.physical_block_id) let mut should_remap = 0 if current.k_precision_name != desired_k {
+            should_remap = 1
+        }
+        if current.v_precision_name != desired_v {
+            should_remap = 1
+        }
+        if current.role_name != desired_role {
+            should_remap = 1
+        }
+        if current.is_hot != logical_block_is_hot(manager, logical_block_id) {
+            should_remap = 1
+        }
+        if should_remap == 1 {
+            let replacement = kv.physical_block_pool.allocate(pool, layer_id, current.start_token, current.token_count, desired_k, desired_v, desired_role, logical_block_is_hot(manager, logical_block_id), 0, if logical_block_is_hot(manager, logical_block_id) == 1 {
+                0
+            } else {
+                1
+            }
+            , current.generation + 1,) table = kv.logical_block_table.replace_mapping(table, logical_block_id, replacement.physical_block_id, reference.token_count) pool = kv.physical_block_pool.increment_refcount(replacement.pool, replacement.physical_block_id) pool = kv.physical_block_pool.decrement_refcount(pool, current.physical_block_id) remapped = remapped + 1
+        }
+        logical_block_id = logical_block_id + 1
+    }
+    return DemotionResult {
+        pool: pool, table: table, remapped: remapped,
+    }
+}
+fn demote_layer_with_plan(shape: model.EngineShape, compiled: runtime.tmh_plan.TMHMemoryPlan, policy_name: str, layer_id: i32, manager: ManagedSession) -> DemotionResult {
+    let mut pool = pool_of(manager) let mut table = table_at(manager, layer_id) let mut remapped = 0 let mut logical_block_id = 0 while logical_block_id < kv.logical_block_table.len(table) {
+        let desired_k = planned_k_precision_name(compiled, policy_name, logical_block_id, layer_id, manager) let desired_v = planned_v_precision_name(shape, compiled, policy_name, logical_block_id, layer_id, manager) let desired_role = planned_role_name(shape, compiled, logical_block_id, layer_id, manager) let desired_hot = planned_is_hot(compiled, logical_block_id, layer_id, manager) let reference = kv.logical_block_table.ref_at(table, logical_block_id) let current = kv.physical_block_pool.block_at(pool, reference.physical_block_id) let mut should_remap = 0 if current.k_precision_name != desired_k {
+            should_remap = 1
+        }
+        if current.v_precision_name != desired_v {
+            should_remap = 1
+        }
+        if current.role_name != desired_role {
+            should_remap = 1
+        }
+        if current.is_hot != desired_hot {
+            should_remap = 1
+        }
+        if should_remap == 1 {
+            let replacement = kv.physical_block_pool.allocate(pool, layer_id, current.start_token, current.token_count, desired_k, desired_v, desired_role, desired_hot, 0, if desired_hot == 1 { 0 } else { 1 }, current.generation + 1,) table = kv.logical_block_table.replace_mapping(table, logical_block_id, replacement.physical_block_id, reference.token_count) pool = kv.physical_block_pool.increment_refcount(replacement.pool, replacement.physical_block_id) pool = kv.physical_block_pool.decrement_refcount(pool, current.physical_block_id) remapped = remapped + 1
+        }
+        logical_block_id = logical_block_id + 1
+    }
+    return DemotionResult {
+        pool: pool, table: table, remapped: remapped,
+    }
+}
+fn build_session_live(shape: model.EngineShape, hot_budget_pct: i32, policy_name: str, used_blocks: i32, tail_block_tokens: i32) -> ManagedSession {
+    let runtime_cfg = model.artifacts.runtime_config_for_policy_name_active(shape, hot_budget_pct, policy_name, used_blocks) let recent_start_block = if runtime_cfg.hot_pages >= used_blocks {
+        0
+    } else {
+        used_blocks - runtime_cfg.hot_pages
+    }
+    let mut pool = kv.physical_block_pool.create() let mut layer_tables_wire = "" let layout = ManagedSession {
+        pool_blocks_wire: "", pool_free_ids_wire: "", pool_next_block_id: 0, pool_live_blocks: 0, pool_total_allocations: 0, pool_total_frees: 0, layer_tables_wire: "", used_blocks: used_blocks, hot_blocks: runtime_cfg.hot_pages, recent_start_block: recent_start_block, block_remaps: 0, copy_on_write_count: 0,
+    }
+    let mut layer_id = 0 while layer_id < shape.layer_count {
+        let mut table = kv.logical_block_table.create(0, layer_id) let mut logical_block_id = 0 while logical_block_id < used_blocks {
+            let token_count = if logical_block_id < used_blocks - 1 {
+                shape.page_tokens
+            } else {
+                tail_block_tokens
+            }
+            let alloc = kv.physical_block_pool.allocate(pool, layer_id, logical_block_id * shape.page_tokens, token_count, "raw", "raw", desired_role_name(shape, layer_id, logical_block_id, layout), logical_block_is_hot(layout, logical_block_id), 0, 0, 0,) pool = kv.physical_block_pool.increment_refcount(alloc.pool, alloc.physical_block_id) table = kv.logical_block_table.append_mapping(table, alloc.physical_block_id, token_count) logical_block_id = logical_block_id + 1
+        }
+        layer_tables_wire = frame_push(layer_tables_wire, table_json(table)) layer_id = layer_id + 1
+    }
+    if trace_enabled() == 1 {
+        discard term.write(str.concat(str.concat(str.concat("FPA_TRACE_BUILD_LIVE local_pool_blocks_len=", str.from_i32(kv.physical_block_pool.blocks_len(pool.blocks_wire))), str.concat(" local_pool_wire_len=", str.from_i32(str.len(pool.blocks_wire)))), "\n"))
+    }
+    let mut manager = ManagedSession {
+        pool_blocks_wire: pool.blocks_wire, pool_free_ids_wire: pool.free_ids_wire, pool_next_block_id: pool.next_block_id, pool_live_blocks: pool.live_blocks, pool_total_allocations: pool.total_allocations, pool_total_frees: pool.total_frees, layer_tables_wire: layer_tables_wire, used_blocks: used_blocks, hot_blocks: runtime_cfg.hot_pages, recent_start_block: recent_start_block, block_remaps: 0, copy_on_write_count: 0,
+    }
+    if policy_requires_remap(policy_name) == 0 {
+        return manager
+    }
+    if manager.used_blocks <= manager.hot_blocks {
+        return manager
+    }
+    if trace_enabled() == 1 {
+        discard term.write(str.concat(str.concat(str.concat("FPA_TRACE_BUILD_LIVE manager_pool_blocks_len=", str.from_i32(kv.physical_block_pool.blocks_len(manager.pool_blocks_wire))), str.concat(" manager_pool_wire_len=", str.from_i32(str.len(manager.pool_blocks_wire)))), "\n"))
+    }
+    layer_id = 0 while layer_id < shape.layer_count {
+        let demoted = demote_layer(shape, policy_name, layer_id, manager) let pooled = with_pool(manager, demoted.pool) let remapped = ManagedSession {
+            pool_blocks_wire: pooled.pool_blocks_wire, pool_free_ids_wire: pooled.pool_free_ids_wire, pool_next_block_id: pooled.pool_next_block_id, pool_live_blocks: pooled.pool_live_blocks, pool_total_allocations: pooled.pool_total_allocations, pool_total_frees: pooled.pool_total_frees, layer_tables_wire: pooled.layer_tables_wire, used_blocks: pooled.used_blocks, hot_blocks: pooled.hot_blocks, recent_start_block: pooled.recent_start_block, block_remaps: manager.block_remaps + demoted.remapped, copy_on_write_count: pooled.copy_on_write_count,
+        }
+        manager = with_table(remapped, layer_id, demoted.table) layer_id = layer_id + 1
+    }
+    return manager
+}
+fn build_session(shape: model.EngineShape, hot_budget_pct: i32, policy_name: str, used_blocks: i32, tail_block_tokens: i32) -> ManagedSession {
+    return manager_from_manager_wire(build_session_wire(shape, hot_budget_pct, policy_name, used_blocks, tail_block_tokens))
+}
+fn build_session_planned(shape: model.EngineShape, hot_budget_pct: i32, policy_name: str, used_blocks: i32, tail_block_tokens: i32, prompt_pages: i32, recent_start_page: i32) -> ManagedSession {
+    let runtime_cfg = model.artifacts.runtime_config_for_policy_name_active(shape, hot_budget_pct, policy_name, used_blocks) let normalized_recent_start_page = if runtime_cfg.hot_pages >= used_blocks {
+        0
+    } else {
+        recent_start_page
+    }
+    let compiled = runtime.tmh_plan.compile(shape, policy_name, used_blocks, prompt_pages, normalized_recent_start_page) let recent_start_block = if runtime_cfg.hot_pages >= used_blocks {
+        0
+    } else {
+        used_blocks - runtime_cfg.hot_pages
+    }
+    let mut pool = kv.physical_block_pool.create() let mut layer_tables_wire = "" let layout = ManagedSession {
+        pool_blocks_wire: "", pool_free_ids_wire: "", pool_next_block_id: 0, pool_live_blocks: 0, pool_total_allocations: 0, pool_total_frees: 0, layer_tables_wire: "", used_blocks: used_blocks, hot_blocks: runtime_cfg.hot_pages, recent_start_block: recent_start_block, block_remaps: 0, copy_on_write_count: 0,
+    }
+    let mut layer_id = 0 while layer_id < shape.layer_count {
+        let mut table = kv.logical_block_table.create(0, layer_id) let mut logical_block_id = 0 while logical_block_id < used_blocks {
+            let token_count = if logical_block_id < used_blocks - 1 {
+                shape.page_tokens
+            } else {
+                tail_block_tokens
+            }
+            let alloc = kv.physical_block_pool.allocate(pool, layer_id, logical_block_id * shape.page_tokens, token_count, "raw", "raw", desired_role_name(shape, layer_id, logical_block_id, layout), logical_block_is_hot(layout, logical_block_id), 0, 0, 0,) pool = kv.physical_block_pool.increment_refcount(alloc.pool, alloc.physical_block_id) table = kv.logical_block_table.append_mapping(table, alloc.physical_block_id, token_count) logical_block_id = logical_block_id + 1
+        }
+        layer_tables_wire = frame_push(layer_tables_wire, table_json(table)) layer_id = layer_id + 1
+    }
+    let mut manager = ManagedSession {
+        pool_blocks_wire: pool.blocks_wire, pool_free_ids_wire: pool.free_ids_wire, pool_next_block_id: pool.next_block_id, pool_live_blocks: pool.live_blocks, pool_total_allocations: pool.total_allocations, pool_total_frees: pool.total_frees, layer_tables_wire: layer_tables_wire, used_blocks: used_blocks, hot_blocks: runtime_cfg.hot_pages, recent_start_block: recent_start_block, block_remaps: 0, copy_on_write_count: 0,
+    }
+    if policy_requires_remap(policy_name) == 0 {
+        return manager
+    }
+    layer_id = 0 while layer_id < shape.layer_count {
+        let demoted = demote_layer_with_plan(shape, compiled, policy_name, layer_id, manager) let pooled = with_pool(manager, demoted.pool) let remapped = ManagedSession {
+            pool_blocks_wire: pooled.pool_blocks_wire, pool_free_ids_wire: pooled.pool_free_ids_wire, pool_next_block_id: pooled.pool_next_block_id, pool_live_blocks: pooled.pool_live_blocks, pool_total_allocations: pooled.pool_total_allocations, pool_total_frees: pooled.pool_total_frees, layer_tables_wire: pooled.layer_tables_wire, used_blocks: pooled.used_blocks, hot_blocks: pooled.hot_blocks, recent_start_block: pooled.recent_start_block, block_remaps: manager.block_remaps + demoted.remapped, copy_on_write_count: pooled.copy_on_write_count,
+        }
+        manager = with_table(remapped, layer_id, demoted.table) layer_id = layer_id + 1
+    }
+    return manager
+}
+fn build_session_wire(shape: model.EngineShape, hot_budget_pct: i32, policy_name: str, used_blocks: i32, tail_block_tokens: i32) -> str {
+    let runtime_cfg = model.artifacts.runtime_config_for_policy_name_active(shape, hot_budget_pct, policy_name, used_blocks) let recent_start_block = if runtime_cfg.hot_pages >= used_blocks {
+        0
+    } else {
+        used_blocks - runtime_cfg.hot_pages
+    }
+    let seed = ManagedSession {
+        pool_blocks_wire: "", pool_free_ids_wire: "", pool_next_block_id: 0, pool_live_blocks: 0, pool_total_allocations: 0, pool_total_frees: 0, layer_tables_wire: "", used_blocks: used_blocks, hot_blocks: runtime_cfg.hot_pages, recent_start_block: recent_start_block, block_remaps: 0, copy_on_write_count: 0,
+    }
+    let mut manager_state_wire = manager_wire(seed) let mut layer_id = 0 while layer_id < shape.layer_count {
+        manager_state_wire = build_layer_table_wire(shape, layer_id, used_blocks, tail_block_tokens, manager_state_wire) trace_manager_pool(str.concat("after_build_layer_", str.from_i32(layer_id)), manager_state_wire) layer_id = layer_id + 1
+    }
+    if policy_requires_remap(policy_name) == 0 {
+        return manager_state_wire
+    }
+    layer_id = 0 while layer_id < shape.layer_count {
+        manager_state_wire = demote_layer_wire(shape, policy_name, layer_id, manager_state_wire) trace_manager_pool(str.concat("after_demote_layer_", str.from_i32(layer_id)), manager_state_wire) layer_id = layer_id + 1
+    }
+    return manager_state_wire
+}
+fn refresh_layout(shape: model.EngineShape, hot_budget_pct: i32, policy_name: str, manager: ManagedSession) -> ManagedSession {
+    let runtime_cfg = model.artifacts.runtime_config_for_policy_name_active(shape, hot_budget_pct, policy_name, manager.used_blocks) let recent_start_block = if runtime_cfg.hot_pages >= manager.used_blocks {
+        0
+    } else {
+        manager.used_blocks - runtime_cfg.hot_pages
+    }
+    let mut updated = ManagedSession {
+        pool_blocks_wire: manager.pool_blocks_wire, pool_free_ids_wire: manager.pool_free_ids_wire, pool_next_block_id: manager.pool_next_block_id, pool_live_blocks: manager.pool_live_blocks, pool_total_allocations: manager.pool_total_allocations, pool_total_frees: manager.pool_total_frees, layer_tables_wire: manager.layer_tables_wire, used_blocks: manager.used_blocks, hot_blocks: runtime_cfg.hot_pages, recent_start_block: recent_start_block, block_remaps: manager.block_remaps, copy_on_write_count: manager.copy_on_write_count,
+    }
+    if policy_requires_remap(policy_name) == 0 {
+        return updated
+    }
+    if updated.used_blocks <= updated.hot_blocks {
+        return updated
+    }
+    let mut layer_id = 0 while layer_id < shape.layer_count {
+        let demoted = demote_layer(shape, policy_name, layer_id, updated) let pooled = with_pool(updated, demoted.pool) let remapped = ManagedSession {
+            pool_blocks_wire: pooled.pool_blocks_wire, pool_free_ids_wire: pooled.pool_free_ids_wire, pool_next_block_id: pooled.pool_next_block_id, pool_live_blocks: pooled.pool_live_blocks, pool_total_allocations: pooled.pool_total_allocations, pool_total_frees: pooled.pool_total_frees, layer_tables_wire: pooled.layer_tables_wire, used_blocks: pooled.used_blocks, hot_blocks: pooled.hot_blocks, recent_start_block: pooled.recent_start_block, block_remaps: updated.block_remaps + demoted.remapped, copy_on_write_count: pooled.copy_on_write_count,
+        }
+        updated = with_table(remapped, layer_id, demoted.table) layer_id = layer_id + 1
+    }
+    return updated
+}
+fn append_token(shape: model.EngineShape, hot_budget_pct: i32, policy_name: str, manager: ManagedSession, tail_block_tokens: i32) -> AppendResult {
+    if manager.used_blocks <= 0 {
+        let built = build_session(shape, hot_budget_pct, policy_name, 1, 1) return AppendResult {
+            manager: built, used_blocks: 1, tail_block_tokens: 1,
+        }
+    }
+    if tail_block_tokens < shape.page_tokens {
+        if trace_enabled() == 1 {
+            discard term.write(str.concat(str.concat(str.concat("FPA_TRACE_APPEND tail_update used_blocks=", str.from_i32(manager.used_blocks)), str.concat(" tail_block_tokens=", str.from_i32(tail_block_tokens))), "\n"))
+        }
+        let tail_block_id = manager.used_blocks - 1 let next_tokens = tail_block_tokens + 1 let mut pool = pool_of(manager) let mut tables = manager.layer_tables_wire let mut copy_on_write_count = manager.copy_on_write_count let mut layer_id = 0 while layer_id < shape.layer_count {
+            if trace_enabled() == 1 {
+                discard term.write(str.concat(str.concat("FPA_TRACE_APPEND layer=", str.from_i32(layer_id)), "\n"))
+            }
+            let table_manager = ManagedSession {
+                pool_blocks_wire: pool.blocks_wire, pool_free_ids_wire: pool.free_ids_wire, pool_next_block_id: pool.next_block_id, pool_live_blocks: pool.live_blocks, pool_total_allocations: pool.total_allocations, pool_total_frees: pool.total_frees, layer_tables_wire: tables, used_blocks: manager.used_blocks, hot_blocks: manager.hot_blocks, recent_start_block: manager.recent_start_block, block_remaps: manager.block_remaps, copy_on_write_count: copy_on_write_count,
+            }
+            let table = table_at(table_manager, layer_id) let detached = runtime.cow.ensure_private_mapping(pool, table, tail_block_id) pool = detached.pool copy_on_write_count = copy_on_write_count + detached.copied let reference = kv.logical_block_table.ref_at(detached.table, tail_block_id) pool = kv.physical_block_pool.set_token_count(pool, reference.physical_block_id, next_tokens) let updated_table = kv.logical_block_table.replace_mapping(detached.table, tail_block_id, reference.physical_block_id, next_tokens) let update_manager = ManagedSession {
+                pool_blocks_wire: pool.blocks_wire, pool_free_ids_wire: pool.free_ids_wire, pool_next_block_id: pool.next_block_id, pool_live_blocks: pool.live_blocks, pool_total_allocations: pool.total_allocations, pool_total_frees: pool.total_frees, layer_tables_wire: tables, used_blocks: manager.used_blocks, hot_blocks: manager.hot_blocks, recent_start_block: manager.recent_start_block, block_remaps: manager.block_remaps, copy_on_write_count: copy_on_write_count,
+            }
+            tables = rebuild_tables_with(update_manager, layer_id, updated_table) layer_id = layer_id + 1
+        }
+        if trace_enabled() == 1 {
+            discard term.write("FPA_TRACE_APPEND refresh_begin\n")
+        }
+        if policy_requires_remap(policy_name) == 0 {
+            let runtime_cfg = model.artifacts.runtime_config_for_policy_name_active(shape, hot_budget_pct, policy_name, manager.used_blocks) let recent_start_block = if runtime_cfg.hot_pages >= manager.used_blocks {
+                0
+            } else {
+                manager.used_blocks - runtime_cfg.hot_pages
+            }
+            let updated_manager = ManagedSession {
+                pool_blocks_wire: pool.blocks_wire, pool_free_ids_wire: pool.free_ids_wire, pool_next_block_id: pool.next_block_id, pool_live_blocks: pool.live_blocks, pool_total_allocations: pool.total_allocations, pool_total_frees: pool.total_frees, layer_tables_wire: tables, used_blocks: manager.used_blocks, hot_blocks: runtime_cfg.hot_pages, recent_start_block: recent_start_block, block_remaps: manager.block_remaps, copy_on_write_count: copy_on_write_count,
+            }
+            return AppendResult {
+                manager: updated_manager, used_blocks: manager.used_blocks, tail_block_tokens: next_tokens,
+            }
+        }
+        let updated_manager = ManagedSession {
+            pool_blocks_wire: pool.blocks_wire, pool_free_ids_wire: pool.free_ids_wire, pool_next_block_id: pool.next_block_id, pool_live_blocks: pool.live_blocks, pool_total_allocations: pool.total_allocations, pool_total_frees: pool.total_frees, layer_tables_wire: tables, used_blocks: manager.used_blocks, hot_blocks: manager.hot_blocks, recent_start_block: manager.recent_start_block, block_remaps: manager.block_remaps, copy_on_write_count: copy_on_write_count,
+        }
+        let refreshed = refresh_layout(shape, hot_budget_pct, policy_name, updated_manager) return AppendResult {
+            manager: refreshed, used_blocks: manager.used_blocks, tail_block_tokens: next_tokens,
+        }
+    }
+    let next_used_blocks = manager.used_blocks + 1 let new_start_token = manager.used_blocks * shape.page_tokens let runtime_cfg = model.artifacts.runtime_config_for_policy_name_active(shape, hot_budget_pct, policy_name, next_used_blocks) let recent_start_block = if runtime_cfg.hot_pages >= next_used_blocks {
+        0
+    } else {
+        next_used_blocks - runtime_cfg.hot_pages
+    }
+    let seeded = ManagedSession {
+        pool_blocks_wire: manager.pool_blocks_wire, pool_free_ids_wire: manager.pool_free_ids_wire, pool_next_block_id: manager.pool_next_block_id, pool_live_blocks: manager.pool_live_blocks, pool_total_allocations: manager.pool_total_allocations, pool_total_frees: manager.pool_total_frees, layer_tables_wire: manager.layer_tables_wire, used_blocks: next_used_blocks, hot_blocks: runtime_cfg.hot_pages, recent_start_block: recent_start_block, block_remaps: manager.block_remaps, copy_on_write_count: manager.copy_on_write_count,
+    }
+    let mut pool = pool_of(seeded) let mut tables = seeded.layer_tables_wire let mut layer_id = 0 while layer_id < shape.layer_count {
+        let alloc = kv.physical_block_pool.allocate(pool, layer_id, new_start_token, 1, "raw", "raw", "recent", 1, 0, 0, 0,) pool = kv.physical_block_pool.increment_refcount(alloc.pool, alloc.physical_block_id) let table = table_at(ManagedSession {
+            pool_blocks_wire: pool.blocks_wire, pool_free_ids_wire: pool.free_ids_wire, pool_next_block_id: pool.next_block_id, pool_live_blocks: pool.live_blocks, pool_total_allocations: pool.total_allocations, pool_total_frees: pool.total_frees, layer_tables_wire: tables, used_blocks: next_used_blocks, hot_blocks: seeded.hot_blocks, recent_start_block: seeded.recent_start_block, block_remaps: manager.block_remaps, copy_on_write_count: manager.copy_on_write_count,
+        }
+        , layer_id) let updated_table = kv.logical_block_table.append_mapping(table, alloc.physical_block_id, 1) tables = rebuild_tables_with(ManagedSession {
+            pool_blocks_wire: pool.blocks_wire, pool_free_ids_wire: pool.free_ids_wire, pool_next_block_id: pool.next_block_id, pool_live_blocks: pool.live_blocks, pool_total_allocations: pool.total_allocations, pool_total_frees: pool.total_frees, layer_tables_wire: tables, used_blocks: next_used_blocks, hot_blocks: seeded.hot_blocks, recent_start_block: seeded.recent_start_block, block_remaps: manager.block_remaps, copy_on_write_count: manager.copy_on_write_count,
+        }
+        , layer_id, updated_table) layer_id = layer_id + 1
+    }
+    if policy_requires_remap(policy_name) == 0 {
+        let updated_manager = ManagedSession {
+            pool_blocks_wire: pool.blocks_wire, pool_free_ids_wire: pool.free_ids_wire, pool_next_block_id: pool.next_block_id, pool_live_blocks: pool.live_blocks, pool_total_allocations: pool.total_allocations, pool_total_frees: pool.total_frees, layer_tables_wire: tables, used_blocks: next_used_blocks, hot_blocks: seeded.hot_blocks, recent_start_block: seeded.recent_start_block, block_remaps: manager.block_remaps, copy_on_write_count: manager.copy_on_write_count,
+        }
+        return AppendResult {
+            manager: updated_manager, used_blocks: next_used_blocks, tail_block_tokens: 1,
+        }
+    }
+    let updated_manager = ManagedSession {
+        pool_blocks_wire: pool.blocks_wire, pool_free_ids_wire: pool.free_ids_wire, pool_next_block_id: pool.next_block_id, pool_live_blocks: pool.live_blocks, pool_total_allocations: pool.total_allocations, pool_total_frees: pool.total_frees, layer_tables_wire: tables, used_blocks: next_used_blocks, hot_blocks: seeded.hot_blocks, recent_start_block: seeded.recent_start_block, block_remaps: manager.block_remaps, copy_on_write_count: manager.copy_on_write_count,
+    }
+    let refreshed = refresh_layout(shape, hot_budget_pct, policy_name, updated_manager) return AppendResult {
+        manager: refreshed, used_blocks: next_used_blocks, tail_block_tokens: 1,
+    }
+}
+fn append_token_wire(shape: model.EngineShape, hot_budget_pct: i32, policy_name: str, manager: ManagedSession, tail_block_tokens: i32) -> str {
+    return append_wire(append_token(shape, hot_budget_pct, policy_name, manager, tail_block_tokens))
+}
+fn table_count(wire: str) -> i32 {
+    if wire == "" {
+        return 0
+    }
+    let mut count = 0 let mut idx = 0 while idx < str.len(wire) {
+        let sep = frame_sep(wire, idx) if sep < 0 {
+            return count
+        }
+        let size = model.artifacts.parse_i32(str.slice(wire, idx, sep)) idx = sep + 1 + size count = count + 1
+    }
+    return count
+}
+fn table_segment(wire: str, position: i32) -> str {
+    return frame_value_at(wire, position)
+}

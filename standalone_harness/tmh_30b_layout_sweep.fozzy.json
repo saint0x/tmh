@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "name": "tmh-30b-layout-sweep",
+  "steps": [
+    {
+      "type": "proc_when",
+      "cmd": "/usr/bin/python3",
+      "args": [
+        "/home/deepsaint/work/kv-tiered/tmh/standalone_harness/validate_tmh_30b_layout_sweep.py"
+      ],
+      "exit_code": 0,
+      "stdout": "tmh-sweep-ok\n",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "/usr/bin/python3",
+      "args": [
+        "/home/deepsaint/work/kv-tiered/tmh/standalone_harness/validate_tmh_30b_layout_sweep.py"
+      ],
+      "expect_exit": 0,
+      "expect_stdout": "tmh-sweep-ok\n"
+    }
+  ]
+}

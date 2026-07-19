@@ -1,0 +1,65 @@
+mod artifacts;
+mod forward_pass;
+mod json_emit;
+mod model_loader;
+mod qwen_runner;
+mod safetensors_loader;
+mod tokenizer_bridge;
+#[repr(C)] enum PolicyKind {
+    FullKv, PagedFullKv, RecentOnly, QuantizedOldKv, FidelityPagedKv,
+}
+struct EngineShape {
+    layer_count: i32, head_count: i32, head_dim: i32, page_tokens: i32, context_tokens: i32, late_layer_start: i32,
+}
+fn default_shape() -> EngineShape {
+    return engine_shape(24, 8, 64, 64, 512, 18)
+}
+fn engine_shape(layer_count: i32, head_count: i32, head_dim: i32, page_tokens: i32, context_tokens: i32, late_layer_start: i32) -> EngineShape {
+    return EngineShape {
+        layer_count: layer_count, head_count: head_count, head_dim: head_dim, page_tokens: page_tokens, context_tokens: context_tokens, late_layer_start: late_layer_start,
+    }
+}
+fn total_pages(shape: EngineShape) -> i32 {
+    return shape.context_tokens / shape.page_tokens
+}
+fn total_layers(shape: EngineShape) -> i32 {
+    return shape.layer_count
+}
+fn page_token_start(shape: EngineShape, page_id: i32) -> i32 {
+    return page_id * shape.page_tokens
+}
+fn hot_pages_from_budget(shape: EngineShape, budget_pct: i32) -> i32 {
+    if budget_pct <= 0 {
+        return 0
+    }
+    let pages = total_pages(shape) let mut hot = (pages * budget_pct) / 100 if (pages * budget_pct)% 100 != 0 {
+        hot = hot + 1
+    }
+    if hot < 1 {
+        hot = 1
+    }
+    if hot > pages {
+        hot = pages
+    }
+    return hot
+}
+fn policy_from_str(policy_name: str) -> PolicyKind {
+    if policy_name == "full_kv" {
+        return PolicyKind::FullKv
+    }
+    if policy_name == "paged_full_kv" {
+        return PolicyKind::PagedFullKv
+    }
+    if policy_name == "recent_only" {
+        return PolicyKind::RecentOnly
+    }
+    if policy_name == "quantized_old_kv" {
+        return PolicyKind::QuantizedOldKv
+    }
+    return PolicyKind::FidelityPagedKv
+}
+fn policy_name(policy: PolicyKind) -> str {
+    match policy {
+        PolicyKind::FullKv => return "full_kv", PolicyKind::PagedFullKv => return "paged_full_kv", PolicyKind::RecentOnly => return "recent_only", PolicyKind::QuantizedOldKv => return "quantized_old_kv", _ => return "fidelity_paged_kv",
+    }
+}

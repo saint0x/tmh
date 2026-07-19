@@ -1,0 +1,107 @@
+use model;
+use runtime;
+
+struct ComparisonMetrics {
+    total_tokens: i32, matching_tokens: i32, top1_agreement_pct: i32, exact_match: i32, edit_distance: i32, contains_target: i32,
+}
+fn frame_push(wire: str, value: str) -> str {
+    return runtime.block_manager.frame_push(wire, value)
+}
+fn frame_value_at(wire: str, position: i32) -> str {
+    return runtime.block_manager.frame_value_at(wire, position)
+}
+fn comparison_wire(total_tokens: i32, matching_tokens: i32, top1_agreement_pct: i32, exact_match: i32, edit_distance: i32, contains_target: i32) -> str {
+    let mut wire = ""
+    wire = frame_push(wire, str.from_i32(total_tokens))
+    wire = frame_push(wire, str.from_i32(matching_tokens))
+    wire = frame_push(wire, str.from_i32(top1_agreement_pct))
+    wire = frame_push(wire, str.from_i32(exact_match))
+    wire = frame_push(wire, str.from_i32(edit_distance))
+    wire = frame_push(wire, str.from_i32(contains_target))
+    return wire
+}
+fn field_i32(wire: str, position: i32) -> i32 {
+    return model.artifacts.parse_i32(frame_value_at(wire, position))
+}
+fn total_tokens(wire: str) -> i32 { return field_i32(wire, 0) }
+fn matching_tokens(wire: str) -> i32 { return field_i32(wire, 1) }
+fn top1_agreement_pct(wire: str) -> i32 { return field_i32(wire, 2) }
+fn exact_match(wire: str) -> i32 { return field_i32(wire, 3) }
+fn edit_distance(wire: str) -> i32 { return field_i32(wire, 4) }
+fn contains_target(wire: str) -> i32 { return field_i32(wire, 5) }
+fn token_count_from_wire(wire: str) -> i32 {
+    if wire == "" {
+        return 0
+    }
+    let mut count = 1 let mut idx = 0 while idx < str.len(wire) {
+        if str.slice(wire, idx, idx + 1) == "|" {
+            count = count + 1
+        }
+        idx = idx + 1
+    }
+    return count
+}
+fn token_at(wire: str, position: i32) -> str {
+    if position < 0 {
+        return ""
+    }
+    let mut current = 0 let mut start = 0 let mut idx = 0 while idx <= str.len(wire) {
+        if idx == str.len(wire) || str.slice(wire, idx, idx + 1) == "|" {
+            if current == position {
+                return str.slice(wire, start, idx)
+            }
+            current = current + 1 start = idx + 1
+        }
+        idx = idx + 1
+    }
+    return ""
+}
+fn compare(baseline_wire: str, candidate_wire: str, baseline_text: str, candidate_text: str, target_hint: str) -> ComparisonMetrics {
+    let wire = compare_wire(baseline_wire, candidate_wire, baseline_text, candidate_text, target_hint)
+    return ComparisonMetrics {
+        total_tokens: total_tokens(wire), matching_tokens: matching_tokens(wire), top1_agreement_pct: top1_agreement_pct(wire), exact_match: exact_match(wire), edit_distance: edit_distance(wire), contains_target: contains_target(wire),
+    }
+}
+fn compare_wire(baseline_wire: str, candidate_wire: str, baseline_text: str, candidate_text: str, target_hint: str) -> str {
+    let baseline_count = token_count_from_wire(baseline_wire) let candidate_count = token_count_from_wire(candidate_wire) let total_tokens = if baseline_count > candidate_count {
+        baseline_count
+    } else {
+        candidate_count
+    }
+    let min_tokens = if baseline_count < candidate_count {
+        baseline_count
+    } else {
+        candidate_count
+    }
+    let mut matching_tokens = 0 let mut idx = 0 while idx < min_tokens {
+        if token_at(baseline_wire, idx) == token_at(candidate_wire, idx) {
+            matching_tokens = matching_tokens + 1
+        }
+        idx = idx + 1
+    }
+    let top1_agreement_pct = if total_tokens <= 0 {
+        0
+    } else {
+        (matching_tokens * 100) / total_tokens
+    }
+    let edit_distance = (baseline_count - candidate_count_abs(baseline_count, candidate_count)) + (candidate_count - candidate_count_abs(baseline_count, candidate_count)) + (min_tokens - matching_tokens) let contains_target = if target_hint != "" && str.contains(candidate_text, target_hint) == 1 {
+        1
+    } else if baseline_text != "" && str.contains(candidate_text, str.slice(baseline_text, 0, min_i32(3, str.len(baseline_text)))) == 1 {
+        1
+    } else {
+        0
+    }
+    return comparison_wire(total_tokens, matching_tokens, top1_agreement_pct, if baseline_wire == candidate_wire { 1 } else { 0 }, if edit_distance < 0 { 0 - edit_distance } else { edit_distance }, contains_target)
+}
+fn candidate_count_abs(lhs: i32, rhs: i32) -> i32 {
+    if lhs < rhs {
+        return lhs
+    }
+    return rhs
+}
+fn min_i32(lhs: i32, rhs: i32) -> i32 {
+    if lhs < rhs {
+        return lhs
+    }
+    return rhs
+}

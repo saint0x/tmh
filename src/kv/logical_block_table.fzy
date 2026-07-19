@@ -1,0 +1,216 @@
+use model;
+struct LogicalBlockRef {
+    physical_block_id: i32, token_count: i32,
+}
+struct LogicalBlockTable {
+    seq_id: i32, layer_id: i32, refs_wire: str,
+}
+struct FrameRead {
+    value: str, next_idx: i32,
+}
+fn frame_push(wire: str, value: str) -> str {
+    return str.concat(str.concat(str.concat(wire, str.from_i32(str.len(value))), "#"), value)
+}
+fn frame_sep(wire: str, start: i32) -> i32 {
+    let mut idx = start while idx < str.len(wire) {
+        if str.slice(wire, idx, idx + 1) == "#" {
+            return idx
+        }
+        idx = idx + 1
+    }
+    return - 1
+}
+fn frame_value_at(wire: str, position: i32) -> str {
+    if position < 0 {
+        return ""
+    }
+    let mut current = 0 let mut idx = 0 while idx < str.len(wire) {
+        let sep = frame_sep(wire, idx) if sep < 0 {
+            return ""
+        }
+        let size = model.artifacts.parse_i32(str.slice(wire, idx, sep)) let start = sep + 1 let end = start + size if current == position {
+            return str.slice(wire, start, end)
+        }
+        current = current + 1 idx = end
+    }
+    return ""
+}
+fn frame_read_next(wire: str, start: i32) -> FrameRead {
+    let sep = frame_sep(wire, start) if sep < 0 {
+        return FrameRead {
+            value: "", next_idx: str.len(wire)
+        }
+    }
+    let size = model.artifacts.parse_i32(str.slice(wire, start, sep)) let value_start = sep + 1 let value_end = value_start + size return FrameRead {
+        value: str.slice(wire, value_start, value_end), next_idx: value_end,
+    }
+}
+fn create(seq_id: i32, layer_id: i32) -> LogicalBlockTable {
+    return LogicalBlockTable {
+        seq_id: seq_id, layer_id: layer_id, refs_wire: "",
+    }
+}
+fn from_refs_wire(seq_id: i32, layer_id: i32, refs_wire: str) -> LogicalBlockTable {
+    let mut table = create(seq_id, layer_id) let refs = parse_refs(refs_wire) let mut idx = 0 while idx < list.len(refs) {
+        let reference = decode_ref(list.get(refs, idx)) table = append_mapping(table, reference.physical_block_id, reference.token_count) idx = idx + 1
+    }
+    return table
+}
+fn parse_refs(refs_wire: str) -> ListHandle {
+    let refs = list.new() if refs_wire == "" {
+        return refs
+    }
+    let mut idx = 0 while idx < str.len(refs_wire) {
+        let sep = frame_sep(refs_wire, idx) if sep < 0 {
+            return refs
+        }
+        let size = model.artifacts.parse_i32(str.slice(refs_wire, idx, sep)) let start = sep + 1 let end = start + size discard list.push(refs, str.slice(refs_wire, start, end)) idx = end
+    }
+    return refs
+}
+fn join_refs(refs: ListHandle) -> str {
+    let mut wire = "" let mut idx = 0 while idx < list.len(refs) {
+        let entry = list.get(refs, idx) wire = frame_push(wire, entry)
+        idx = idx + 1
+    }
+    return wire
+}
+fn clone_refs_with_append(refs: ListHandle, entry: str) -> ListHandle {
+    let next = list.new() let mut idx = 0 while idx < list.len(refs) {
+        discard list.push(next, list.get(refs, idx)) idx = idx + 1
+    }
+    discard list.push(next, entry) return next
+}
+fn clone_refs_with_replace(refs: ListHandle, position: i32, entry: str) -> ListHandle {
+    let next = list.new() let mut idx = 0 while idx < list.len(refs) {
+        if idx == position {
+            discard list.push(next, entry)
+        } else {
+            discard list.push(next, list.get(refs, idx))
+        }
+        idx = idx + 1
+    }
+    return next
+}
+fn clone_refs_without_last(refs: ListHandle) -> ListHandle {
+    let next = list.new() let mut idx = 0 while idx + 1 < list.len(refs) {
+        discard list.push(next, list.get(refs, idx)) idx = idx + 1
+    }
+    return next
+}
+fn encode_ref(reference: LogicalBlockRef) -> str {
+    return str.concat(str.concat(str.from_i32(reference.physical_block_id), ","), str.from_i32(reference.token_count))
+}
+fn split_once(raw: str, needle: str) -> i32 {
+    if needle == "" {
+        return - 1
+    }
+    let mut idx = 0 while idx + str.len(needle) <= str.len(raw) {
+        if str.slice(raw, idx, idx + str.len(needle)) == needle {
+            return idx
+        }
+        idx = idx + 1
+    }
+    return - 1
+}
+fn decode_ref(raw: str) -> LogicalBlockRef {
+    let sep = split_once(raw, ",") if sep < 0 {
+        return LogicalBlockRef {
+            physical_block_id: - 1, token_count: 0,
+        }
+    }
+    return LogicalBlockRef {
+        physical_block_id: model.artifacts.parse_i32(str.slice(raw, 0, sep)), token_count: model.artifacts.parse_i32(str.slice(raw, sep + 1, str.len(raw))),
+    }
+}
+fn ref_physical_block_id(raw: str) -> i32 {
+    let sep = split_once(raw, ",")
+    if sep < 0 {
+        return - 1
+    }
+    return model.artifacts.parse_i32(str.slice(raw, 0, sep))
+}
+fn ref_token_count(raw: str) -> i32 {
+    let sep = split_once(raw, ",")
+    if sep < 0 {
+        return 0
+    }
+    return model.artifacts.parse_i32(str.slice(raw, sep + 1, str.len(raw)))
+}
+fn len(table: LogicalBlockTable) -> i32 {
+    return refs_len(table.refs_wire)
+}
+fn refs_len(refs_wire: str) -> i32 {
+    if refs_wire == "" {
+        return 0
+    }
+    let mut count = 0 let mut idx = 0 while idx < str.len(refs_wire) {
+        let sep = frame_sep(refs_wire, idx) if sep < 0 {
+            return count
+        }
+        let size = model.artifacts.parse_i32(str.slice(refs_wire, idx, sep)) idx = sep + 1 + size count = count + 1
+    }
+    return count
+}
+fn ref_segment(table: LogicalBlockTable, logical_block_id: i32) -> str {
+    return ref_segment_from_refs(table.refs_wire, logical_block_id)
+}
+fn ref_segment_from_refs(refs_wire: str, logical_block_id: i32) -> str {
+    return frame_value_at(refs_wire, logical_block_id)
+}
+fn ref_at(table: LogicalBlockTable, logical_block_id: i32) -> LogicalBlockRef {
+    return ref_at_from_refs(table.refs_wire, logical_block_id)
+}
+fn ref_at_from_refs(refs_wire: str, logical_block_id: i32) -> LogicalBlockRef {
+    return decode_ref(ref_segment_from_refs(refs_wire, logical_block_id))
+}
+fn ref_physical_block_id_at_from_refs(refs_wire: str, logical_block_id: i32) -> i32 {
+    return ref_physical_block_id(ref_segment_from_refs(refs_wire, logical_block_id))
+}
+fn ref_token_count_at_from_refs(refs_wire: str, logical_block_id: i32) -> i32 {
+    return ref_token_count(ref_segment_from_refs(refs_wire, logical_block_id))
+}
+fn append_mapping(table: LogicalBlockTable, physical_block_id: i32, token_count: i32) -> LogicalBlockTable {
+    let entry = encode_ref(LogicalBlockRef {
+        physical_block_id: physical_block_id, token_count: token_count,
+    }
+    ) let next_wire = frame_push(table.refs_wire, entry)
+    return LogicalBlockTable {
+        seq_id: table.seq_id, layer_id: table.layer_id, refs_wire: next_wire,
+    }
+}
+fn remove_last_mapping(table: LogicalBlockTable) -> LogicalBlockTable {
+    if len(table) <= 0 {
+        return table
+    }
+    let refs = clone_refs_without_last(parse_refs(table.refs_wire)) return LogicalBlockTable {
+        seq_id: table.seq_id, layer_id: table.layer_id, refs_wire: join_refs(refs),
+    }
+}
+fn replace_mapping(table: LogicalBlockTable, logical_block_id: i32, physical_block_id: i32, token_count: i32) -> LogicalBlockTable {
+    let entry = encode_ref(LogicalBlockRef {
+        physical_block_id: physical_block_id, token_count: token_count,
+    }
+    ) let refs = clone_refs_with_replace(parse_refs(table.refs_wire), logical_block_id, entry) return LogicalBlockTable {
+        seq_id: table.seq_id, layer_id: table.layer_id, refs_wire: join_refs(refs),
+    }
+}
+fn json(table: LogicalBlockTable) -> str {
+    let payload = map.new() discard map.set(payload, "seq_id", model.json_emit.i32(table.seq_id)) discard map.set(payload, "layer_id", model.json_emit.i32(table.layer_id)) discard map.set(payload, "refs_wire", json.str(table.refs_wire)) return json.object(payload)
+}
+fn wire(table: LogicalBlockTable) -> str {
+    let mut out = "" out = frame_push(out, str.from_i32(table.seq_id)) out = frame_push(out, str.from_i32(table.layer_id)) out = frame_push(out, table.refs_wire) return out
+}
+fn from_wire(raw: str) -> LogicalBlockTable {
+    let seq_id = frame_read_next(raw, 0) let layer_id = frame_read_next(raw, seq_id.next_idx) let refs_wire = frame_read_next(raw, layer_id.next_idx) return LogicalBlockTable {
+        seq_id: model.artifacts.parse_i32(seq_id.value), layer_id: model.artifacts.parse_i32(layer_id.value), refs_wire: refs_wire.value,
+    }
+}
+fn from_json(raw: str) -> LogicalBlockTable {
+    if str.contains(raw, "\"seq_id\"") == 1 {
+        let payload = json.parse(raw) return LogicalBlockTable {
+            seq_id: model.artifacts.parse_i32(json.get_str(payload, "seq_id")), layer_id: model.artifacts.parse_i32(json.get_str(payload, "layer_id")), refs_wire: json.get_str(payload, "refs_wire"),
+        }
+    }
+    return from_wire(raw)
+}

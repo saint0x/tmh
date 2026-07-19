@@ -1,0 +1,435 @@
+use bench;
+use kv;
+use model;
+use runtime;
+test "det_parse_hf_decoder_config" {
+    let raw = "{\"hidden_size\":1536,\"num_hidden_layers\":28,\"num_attention_heads\":12,\"num_key_value_heads\":2,\"max_position_embeddings\":32768}"
+    let shape = model.artifacts.shape_from_hf_config(raw, 64)
+    if shape.layer_count != 28 {
+        checkpoint()
+    }
+    if shape.head_count != 12 {
+        checkpoint()
+    }
+    if shape.head_dim != 128 {
+        checkpoint()
+    }
+    if shape.context_tokens != 32768 {
+        checkpoint()
+    }
+}
+test "det_logical_block_table_wire_roundtrip" {
+    let table = kv.logical_block_table.append_mapping(kv.logical_block_table.append_mapping(kv.logical_block_table.create(3, 4), 9, 64), 12, 22,) let decoded = kv.logical_block_table.from_wire(kv.logical_block_table.wire(table)) if decoded.seq_id != 3 {
+        checkpoint()
+    }
+    if decoded.layer_id != 4 {
+        checkpoint()
+    }
+    if kv.logical_block_table.len(decoded) != 2 {
+        checkpoint()
+    }
+    if kv.logical_block_table.ref_at(decoded, 0).physical_block_id != 9 {
+        checkpoint()
+    }
+    if kv.logical_block_table.ref_at(decoded, 1).token_count != 22 {
+        checkpoint()
+    }
+}
+test "det_physical_block_wire_roundtrip" {
+    let pool = kv.physical_block_pool.increment_refcount(kv.physical_block_pool.allocate(kv.physical_block_pool.create(), 2, 128, 22, "raw", "int8", "recent", 1, 0, 0, 7,).pool, 0,) let block = kv.physical_block_pool.block_at(pool, 0) if block.layer_id != 2 {
+        checkpoint()
+    }
+    if block.start_token != 128 {
+        checkpoint()
+    }
+    if block.token_count != 22 {
+        checkpoint()
+    }
+    if kv.physical_block_pool.k_precision_of(block) != kv.kv_page.Precision::Raw {
+        checkpoint()
+    }
+    if kv.physical_block_pool.v_precision_of(block) != kv.kv_page.Precision::Int8 {
+        checkpoint()
+    }
+    if block.is_hot != 1 {
+        checkpoint()
+    }
+}
+test "det_physical_block_pool_tracks_multiple_framed_blocks" {
+    let alloc0 = kv.physical_block_pool.allocate(kv.physical_block_pool.create(), 0, 0, 64, "raw", "raw", "recent", 1, 0, 0, 0,) let alloc1 = kv.physical_block_pool.allocate(kv.physical_block_pool.increment_refcount(alloc0.pool, alloc0.physical_block_id), 1, 64, 32, "int8", "int4", "old", 0, 0, 1, 2,) let pool = kv.physical_block_pool.increment_refcount(alloc1.pool, alloc1.physical_block_id) let left = kv.physical_block_pool.block_at(pool, 0) let right = kv.physical_block_pool.block_at(pool, 1) if kv.physical_block_pool.blocks_len(pool.blocks_wire) != 2 {
+        checkpoint()
+    }
+    if left.token_count != 64 {
+        checkpoint()
+    }
+    if right.layer_id != 1 {
+        checkpoint()
+    }
+    if kv.physical_block_pool.k_precision_of(right) != kv.kv_page.Precision::Int8 {
+        checkpoint()
+    }
+    if kv.physical_block_pool.v_precision_of(right) != kv.kv_page.Precision::Int4 {
+        checkpoint()
+    }
+}
+test "det_physical_block_pool_reuses_freed_ids" {
+    let alloc = kv.physical_block_pool.allocate(kv.physical_block_pool.create(), 0, 0, 64, "raw", "raw", "recent", 1, 0, 0, 0,) let retained = kv.physical_block_pool.increment_refcount(alloc.pool, alloc.physical_block_id) let freed = kv.physical_block_pool.decrement_refcount(retained, alloc.physical_block_id) let reused = kv.physical_block_pool.allocate(freed, 3, 128, 17, "int8", "raw", "old", 0, 0, 0, 4,) let pool = kv.physical_block_pool.increment_refcount(reused.pool, reused.physical_block_id) let block = kv.physical_block_pool.block_at(pool, 0) if reused.physical_block_id != 0 {
+        checkpoint()
+    }
+    if kv.physical_block_pool.free_ids_len(pool.free_ids_wire) != 0 {
+        checkpoint()
+    }
+    if block.layer_id != 3 {
+        checkpoint()
+    }
+    if block.token_count != 17 {
+        checkpoint()
+    }
+    if kv.physical_block_pool.k_precision_of(block) != kv.kv_page.Precision::Int8 {
+        checkpoint()
+    }
+}
+test "det_fidelity_old_v_is_more_compressed_than_quantized_old" {
+    let shape = model.default_shape() let used_blocks = model.total_pages(shape) let fidelity_mem = runtime.residency.memory_report(shape, runtime.block_manager.build_session(shape, 25, "fidelity_paged_kv", used_blocks, shape.page_tokens)) let quant_mem = runtime.residency.memory_report(shape, runtime.block_manager.build_session(shape, 25, "quantized_old_kv", used_blocks, shape.page_tokens)) if fidelity_mem.warm_bytes >= quant_mem.warm_bytes {
+        checkpoint()
+    }
+}
+test "det_recent_only_drops_old_pages" {
+    let shape = model.default_shape() let manager = runtime.block_manager.build_session(shape, 25, "recent_only", 2, shape.page_tokens) let pool = runtime.block_manager.pool_of(manager) let table = runtime.block_manager.table_at(manager, 0) let reference = kv.logical_block_table.ref_at(table, 0) let block = kv.physical_block_pool.block_at(pool, reference.physical_block_id) if kv.physical_block_pool.k_precision_of(block) != kv.kv_page.Precision::Dropped {
+        checkpoint()
+    }
+    if kv.physical_block_pool.v_precision_of(block) != kv.kv_page.Precision::Dropped {
+        checkpoint()
+    }
+}
+test "det_session_state_tracks_prefill_and_decode_pages" {
+    let shape = model.engine_shape(5, 4, 8, 64, 512, 3) let cfg = runtime.session.config("test-model", 64, 25, 70, 10, "fidelity_paged_kv") let state = runtime.session.state(shape, cfg) if state.prefill_pages != 2 {
+        checkpoint()
+    }
+    if state.decode_pages != 0 {
+        checkpoint()
+    }
+    if state.used_pages != 2 {
+        checkpoint()
+    }
+    if state.tail_page_tokens != 16 {
+        checkpoint()
+    }
+    if runtime.session.manager_of(shape, cfg.policy_name, state).used_blocks != 2 {
+        checkpoint()
+    }
+}
+test "det_live_session_advance_grows_tail_before_allocating_new_page" {
+    let shape = model.engine_shape(5, 4, 8, 64, 512, 3) let cfg = runtime.session.config("test-model", 64, 25, 70, 10, "fidelity_paged_kv") let initial = runtime.session.begin(shape, cfg) let next = runtime.session.advance(shape, cfg, initial) if initial.used_pages != 2 {
+        checkpoint()
+    }
+    if next.used_pages != 2 {
+        checkpoint()
+    }
+    if next.tail_page_tokens != 7 {
+        checkpoint()
+    }
+    if next.decode_tokens != 1 {
+        checkpoint()
+    }
+}
+test "det_live_session_advance_allocates_new_page_on_tail_overflow" {
+    let shape = model.engine_shape(5, 4, 8, 64, 512, 3) let cfg = runtime.session.config("test-model", 64, 25, 128, 10, "fidelity_paged_kv") let initial = runtime.session.begin(shape, cfg) let next = runtime.session.advance(shape, cfg, initial) if initial.used_pages != 2 {
+        checkpoint()
+    }
+    if next.used_pages != 3 {
+        checkpoint()
+    }
+    if next.tail_page_tokens != 1 {
+        checkpoint()
+    }
+    if next.decode_pages != 1 {
+        checkpoint()
+    }
+}
+test "det_session_hot_window_uses_active_pages" {
+    let shape = model.default_shape() let cfg = runtime.session.config("test-model", 64, 25, 96, 32, "fidelity_paged_kv") let state = runtime.session.state(shape, cfg) let manager = runtime.session.manager_of(shape, cfg.policy_name, state) let pool = runtime.block_manager.pool_of(manager) let table = runtime.block_manager.table_at(manager, 0) let cold_ref = kv.logical_block_table.ref_at(table, 0) let hot_ref = kv.logical_block_table.ref_at(table, state.used_pages - 1) let cold_block = kv.physical_block_pool.block_at(pool, cold_ref.physical_block_id) let hot_block = kv.physical_block_pool.block_at(pool, hot_ref.physical_block_id) if cold_block.is_hot != 0 {
+        checkpoint()
+    }
+    if hot_block.is_hot != 1 {
+        checkpoint()
+    }
+}
+test "det_residency_report_marks_late_layer_v_as_int8" {
+    let shape = model.default_shape() let cfg = runtime.session.config("test-model", 64, 25, 192, 64, "fidelity_paged_kv") let state = runtime.session.state(shape, cfg) let report = runtime.residency.report(shape, cfg, state) if report.last_page_v_precision != "raw" {
+        checkpoint()
+    }
+    if report.hot_layer_pages <= 0 {
+        checkpoint()
+    }
+    if report.block_remap_count <= 0 {
+        checkpoint()
+    }
+}
+test "det_tmh_plan_compiles_prompt_anchor_for_fidelity" {
+    let shape = model.default_shape() let cfg = runtime.session.config("test-model", 64, 25, 192, 64, "fidelity_paged_kv") let state = runtime.session.state(shape, cfg) let compiled = runtime.tmh_plan.compile(shape, cfg.policy_name, state.used_pages, state.prefill_pages, state.recent_start_page) let first = runtime.tmh_plan.range_for(compiled, 0, 0) if runtime.tmh_plan.range_count(compiled.ranges_wire) <= 0 {
+        checkpoint()
+    }
+    if first.semantic_class != "prompt_anchor" {
+        checkpoint()
+    }
+    if first.pin != 1 {
+        checkpoint()
+    }
+    if first.k_precision_name != "raw" {
+        checkpoint()
+    }
+    if first.v_precision_name != "raw" {
+        checkpoint()
+    }
+    if first.residency_tier != "pinned" {
+        checkpoint()
+    }
+}
+test "det_session_manager_executes_prompt_anchor_plan" {
+    let shape = model.default_shape() let cfg = runtime.session.config("test-model", 64, 25, 192, 64, "fidelity_paged_kv") let state = runtime.session.state(shape, cfg) let manager = runtime.session.manager_of(shape, cfg.policy_name, state) let pool = runtime.block_manager.pool_of(manager) let table = runtime.block_manager.table_at(manager, 0) let reference = kv.logical_block_table.ref_at(table, 0) let block = kv.physical_block_pool.block_at(pool, reference.physical_block_id) if block.role_name != "pinned" {
+        checkpoint()
+    }
+    if block.k_precision_name != "raw" {
+        checkpoint()
+    }
+    if block.v_precision_name != "raw" {
+        checkpoint()
+    }
+    if block.is_hot != 0 {
+        checkpoint()
+    }
+}
+test "det_quantized_old_session_manager_keeps_uniform_old_compression" {
+    let shape = model.default_shape() let cfg = runtime.session.config("test-model", 64, 25, 192, 64, "quantized_old_kv") let state = runtime.session.state(shape, cfg) let manager = runtime.session.manager_of(shape, cfg.policy_name, state) let pool = runtime.block_manager.pool_of(manager) let table = runtime.block_manager.table_at(manager, 0) let reference = kv.logical_block_table.ref_at(table, 0) let block = kv.physical_block_pool.block_at(pool, reference.physical_block_id) if block.role_name == "pinned" {
+        checkpoint()
+    }
+    if block.k_precision_name != "int8" {
+        checkpoint()
+    }
+    if block.v_precision_name != "int8" {
+        checkpoint()
+    }
+}
+test "det_residency_report_emits_mixed_fidelity_precision_census" {
+    let shape = model.default_shape() let cfg = runtime.session.config("test-model", 64, 25, 192, 64, "fidelity_paged_kv") let state = runtime.session.state(shape, cfg) let report = runtime.residency.report(shape, cfg, state) if report.raw_k_pages <= 0 {
+        checkpoint()
+    }
+    if report.int8_k_pages <= 0 {
+        checkpoint()
+    }
+    if report.int4_k_pages != 0 {
+        checkpoint()
+    }
+    if report.raw_v_pages <= 0 {
+        checkpoint()
+    }
+    if report.int8_v_pages <= 0 {
+        checkpoint()
+    }
+    if report.int4_v_pages <= 0 {
+        checkpoint()
+    }
+    if report.dropped_k_pages != 0 {
+        checkpoint()
+    }
+    if report.dropped_v_pages != 0 {
+        checkpoint()
+    }
+}
+test "det_quantized_old_residency_keeps_v_at_int8_only" {
+    let shape = model.default_shape() let cfg = runtime.session.config("test-model", 64, 25, 192, 64, "quantized_old_kv") let state = runtime.session.state(shape, cfg) let report = runtime.residency.report(shape, cfg, state) if report.int8_k_pages <= 0 {
+        checkpoint()
+    }
+    if report.int4_k_pages != 0 {
+        checkpoint()
+    }
+    if report.int8_v_pages <= 0 {
+        checkpoint()
+    }
+    if report.int4_v_pages != 0 {
+        checkpoint()
+    }
+}
+test "det_recent_only_residency_marks_dropped_precision_census" {
+    let shape = model.default_shape() let cfg = runtime.session.config("test-model", 64, 25, 192, 64, "recent_only") let state = runtime.session.state(shape, cfg) let report = runtime.residency.report(shape, cfg, state) if report.dropped_k_pages <= 0 {
+        checkpoint()
+    }
+    if report.dropped_v_pages <= 0 {
+        checkpoint()
+    }
+}
+test "det_paged_full_attention_matches_full" {
+    let shape = model.default_shape() let cfg = runtime.session.config("test-model", 64, 25, 192, 64, "fidelity_paged_kv") let state = runtime.session.state(shape, cfg) if runtime.attention_core.parity_report(shape, cfg, state, runtime.session.placeholder_sequence_wire(state.prompt_tokens), runtime.session.placeholder_sequence_range_wire(state.prompt_tokens, state.decode_tokens)) != 1 {
+        checkpoint()
+    }
+}
+test "det_block_manager_build_session_keeps_hot_tail_raw" {
+    let shape = model.default_shape() let manager = runtime.block_manager.build_session(shape, 25, "fidelity_paged_kv", 1, 22) let pool = runtime.block_manager.pool_of(manager) let table = runtime.block_manager.table_at(manager, shape.layer_count - 1) let reference = kv.logical_block_table.ref_at(table, 0) let block = kv.physical_block_pool.block_at(pool, reference.physical_block_id) if kv.logical_block_table.len(table) != 1 {
+        checkpoint()
+    }
+    if reference.token_count != 22 {
+        checkpoint()
+    }
+    if kv.physical_block_pool.k_precision_of(block) != kv.kv_page.Precision::Raw {
+        checkpoint()
+    }
+    if kv.physical_block_pool.v_precision_of(block) != kv.kv_page.Precision::Raw {
+        checkpoint()
+    }
+    if block.is_hot != 1 {
+        checkpoint()
+    }
+}
+test "det_session_manager_wire_keeps_hot_tail_raw" {
+    let shape = model.default_shape() let cfg = runtime.session.config("test-model", 64, 25, 22, 0, "fidelity_paged_kv") let state = runtime.session.begin(shape, cfg) let manager = runtime.session.manager_of(shape, cfg.policy_name, state) let pool = runtime.block_manager.pool_of(manager) let table = runtime.block_manager.table_at(manager, shape.layer_count - 1) let reference = kv.logical_block_table.ref_at(table, 0) let block = kv.physical_block_pool.block_at(pool, reference.physical_block_id) if kv.logical_block_table.len(table) != 1 {
+        checkpoint()
+    }
+    if reference.token_count != 22 {
+        checkpoint()
+    }
+    if kv.physical_block_pool.k_precision_of(block) != kv.kv_page.Precision::Raw {
+        checkpoint()
+    }
+    if kv.physical_block_pool.v_precision_of(block) != kv.kv_page.Precision::Raw {
+        checkpoint()
+    }
+    if block.is_hot != 1 {
+        checkpoint()
+    }
+}
+test "det_live_session_advance_preserves_canonical_manager_tail" {
+    let shape = model.engine_shape(5, 4, 8, 64, 512, 3) let cfg = runtime.session.config("test-model", 64, 25, 22, 8, "fidelity_paged_kv") let initial = runtime.session.begin(shape, cfg) let next = runtime.session.advance(shape, cfg, initial) let manager = runtime.session.manager_of(shape, cfg.policy_name, next) let pool = runtime.block_manager.pool_of(manager) let table = runtime.block_manager.table_at(manager, shape.layer_count - 1) let reference = kv.logical_block_table.ref_at(table, next.used_pages - 1) let block = kv.physical_block_pool.block_at(pool, reference.physical_block_id) if next.decode_tokens != 1 {
+        checkpoint()
+    }
+    if next.total_tokens != 23 {
+        checkpoint()
+    }
+    if next.tail_page_tokens != 23 {
+        checkpoint()
+    }
+    if next.used_pages != 1 {
+        checkpoint()
+    }
+    if manager.used_blocks != 1 {
+        checkpoint()
+    }
+    if reference.token_count != 23 {
+        checkpoint()
+    }
+    if block.token_count != 23 {
+        checkpoint()
+    }
+    if kv.physical_block_pool.k_precision_of(block) != kv.kv_page.Precision::Raw {
+        checkpoint()
+    }
+    if kv.physical_block_pool.v_precision_of(block) != kv.kv_page.Precision::Raw {
+        checkpoint()
+    }
+    if block.is_hot != 1 {
+        checkpoint()
+    }
+}
+test "det_fidelity_attention_reads_fewer_bytes_than_full" {
+    let shape = model.default_shape() let state_cfg = runtime.session.config("test-model", 64, 25, 192, 64, "fidelity_paged_kv") let state = runtime.session.state(shape, state_cfg) let prompt_wire = runtime.session.placeholder_sequence_wire(state.prompt_tokens) let decode_wire = runtime.session.placeholder_sequence_range_wire(state.prompt_tokens, state.decode_tokens) let fidelity = runtime.attention_core.with_parity(shape, state_cfg, state, prompt_wire, decode_wire) let full_cfg = runtime.session.config("test-model", 64, 100, 192, 64, "full_kv") let full = runtime.attention_core.with_parity(shape, full_cfg, state, prompt_wire, decode_wire) if fidelity.effective_bytes_read >= full.effective_bytes_read {
+        checkpoint()
+    }
+}
+test "det_recent_only_streams_no_old_pages" {
+    let shape = model.default_shape() let cfg = runtime.session.config("test-model", 64, 25, 192, 64, "recent_only") let state = runtime.session.state(shape, cfg) let report = runtime.attention_core.with_parity(shape, cfg, state, runtime.session.placeholder_sequence_wire(state.prompt_tokens), runtime.session.placeholder_sequence_range_wire(state.prompt_tokens, state.decode_tokens)) if report.old_pages_streamed != 0 {
+        checkpoint()
+    }
+}
+test "det_block_manager_demotes_old_blocks_by_remap" {
+    let shape = model.default_shape() let cfg = runtime.session.config("test-model", 64, 25, 192, 64, "fidelity_paged_kv") let state = runtime.session.state(shape, cfg) let manager = runtime.session.manager_of(shape, cfg.policy_name, state) let pool = runtime.block_manager.pool_of(manager) let table = runtime.block_manager.table_at(manager, 0) let first_ref = kv.logical_block_table.ref_at(table, 0) let last_ref = kv.logical_block_table.ref_at(table, state.used_pages - 1) let first_block = kv.physical_block_pool.block_at(pool, first_ref.physical_block_id) let last_block = kv.physical_block_pool.block_at(pool, last_ref.physical_block_id) if kv.physical_block_pool.k_precision_of(first_block) != kv.kv_page.Precision::Int8 {
+        checkpoint()
+    }
+    if kv.physical_block_pool.v_precision_of(first_block) != kv.kv_page.Precision::Int4 {
+        checkpoint()
+    }
+    if kv.physical_block_pool.k_precision_of(last_block) != kv.kv_page.Precision::Raw {
+        checkpoint()
+    }
+}
+test "det_shared_mapping_and_cow_detach_block" {
+    let mut pool = kv.physical_block_pool.create() let alloc = kv.physical_block_pool.allocate(pool, 0, 0, 64, "raw", "raw", "recent", 1, 0, 0, 0) pool = kv.physical_block_pool.increment_refcount(alloc.pool, alloc.physical_block_id) let base = kv.logical_block_table.append_mapping(kv.logical_block_table.create(0, 0), alloc.physical_block_id, 64) let shared = runtime.sharing.share_mapping(pool, kv.logical_block_table.create(1, 0), alloc.physical_block_id, 64) let before = kv.physical_block_pool.block_at(shared.pool, alloc.physical_block_id) if before.refcount != 2 {
+        checkpoint()
+    }
+    let detached = runtime.cow.ensure_private_mapping(shared.pool, base, 0) let old_block = kv.physical_block_pool.block_at(detached.pool, alloc.physical_block_id) let new_ref = kv.logical_block_table.ref_at(detached.table, 0) if detached.copied != 1 {
+        checkpoint()
+    }
+    if new_ref.physical_block_id == alloc.physical_block_id {
+        checkpoint()
+    }
+    if old_block.refcount != 1 {
+        checkpoint()
+    }
+}
+test "det_append_token_detaches_shared_tail_before_growth" {
+    let shape = model.default_shape() let private = runtime.block_manager.build_session(shape, 25, "fidelity_paged_kv", 1, 22) let base_table = runtime.block_manager.table_at(private, 0) let base_ref = kv.logical_block_table.ref_at(base_table, 0) let shared = runtime.sharing.share_mapping(runtime.block_manager.pool_of(private), kv.logical_block_table.create(1, 0), base_ref.physical_block_id, 22) let shared_pool = shared.pool let shared_table = shared.table let with_shared_table = runtime.block_manager.with_table(private, 0, shared_table) let seeded = runtime.block_manager.with_pool(with_shared_table, shared_pool) let appended = runtime.block_manager.append_token(shape, 25, "fidelity_paged_kv", seeded, 22) let next_manager = appended.manager let next_pool = runtime.block_manager.pool_of(next_manager) let next_table = runtime.block_manager.table_at(next_manager, 0) let next_ref = kv.logical_block_table.ref_at(next_table, 0) let old_block = kv.physical_block_pool.block_at(next_pool, base_ref.physical_block_id) let grown_block = kv.physical_block_pool.block_at(next_pool, next_ref.physical_block_id) if appended.tail_block_tokens != 23 {
+        checkpoint()
+    }
+    if next_manager.copy_on_write_count <= seeded.copy_on_write_count {
+        checkpoint()
+    }
+    if next_ref.physical_block_id == base_ref.physical_block_id {
+        checkpoint()
+    }
+    if old_block.token_count != 22 {
+        checkpoint()
+    }
+    if old_block.refcount != 1 {
+        checkpoint()
+    }
+    if grown_block.token_count != 23 {
+        checkpoint()
+    }
+}
+test "det_stress_suite_meets_spec_floor" {
+    if bench.stress_suite.count(bench.stress_suite.default_suite_wire()) < 100 {
+        checkpoint()
+    }
+}
+test "det_begin_with_prompt_keeps_prompt_sequence_tokens" {
+    let shape = model.default_shape() let prompt = model.tokenizer_bridge.encode("alpha prompt", 1024) let cfg = runtime.session.config("test-model", 64, 25, prompt.token_count, 4, "fidelity_paged_kv") let state = runtime.session.begin_with_prompt(shape, cfg, prompt) if state.total_tokens != prompt.token_count {
+        checkpoint()
+    }
+    if runtime.session.token_id_at(prompt.token_ids_wire, 0) != runtime.session.token_id_from_wire(prompt.token_ids_wire, 0) {
+        checkpoint()
+    }
+    if runtime.session.token_id_at(prompt.token_ids_wire, prompt.token_count - 1) != runtime.session.token_id_from_wire(prompt.token_ids_wire, prompt.token_count - 1) {
+        checkpoint()
+    }
+}
+test "det_advance_with_token_appends_sequence_token" {
+    let shape = model.default_shape() let prompt = model.tokenizer_bridge.encode("beta prompt", 1024) let cfg = runtime.session.config("test-model", 64, 25, prompt.token_count, 4, "fidelity_paged_kv") let initial = runtime.session.begin_with_prompt(shape, cfg, prompt) let next = runtime.session.advance_with_token(shape, cfg, initial, 777) let next_sequence = runtime.session.full_sequence_wire(prompt.token_ids_wire, runtime.session.append_token_wire("", 777)) if next.total_tokens != prompt.token_count + 1 {
+        checkpoint()
+    }
+    if runtime.session.token_id_at(next_sequence, next.total_tokens - 1) != 777 {
+        checkpoint()
+    }
+}
+test "det_state_with_prompt_rebuilds_decode_layout_from_sequence" {
+    let decode_wire = runtime.session.placeholder_sequence_range_wire(7, 3) let shape = model.default_shape() let prompt = model.tokenizer_bridge.encode("gamma prompt", 1024) let cfg = runtime.session.config("test-model", 64, 25, prompt.token_count, 4, "fidelity_paged_kv") let state = runtime.session.state_with_prompt(shape, cfg, prompt, decode_wire) if state.decode_tokens != 3 {
+        checkpoint()
+    }
+    if state.total_tokens != prompt.token_count + 3 {
+        checkpoint()
+    }
+    if runtime.session.token_id_at_parts(state, prompt.token_ids_wire, decode_wire, state.total_tokens - 1) != 9 {
+        checkpoint()
+    }
+}
+test "det_state_with_prompt_ignores_planned_decode_budget_when_sequence_is_empty" {
+    let shape = model.default_shape() let prompt = model.tokenizer_bridge.encode("delta prompt", 1024) let cfg = runtime.session.config("test-model", 64, 25, prompt.token_count, 12, "fidelity_paged_kv") let state = runtime.session.state_with_prompt(shape, cfg, prompt, "") if state.decode_tokens != 0 {
+        checkpoint()
+    }
+    if state.total_tokens != prompt.token_count {
+        checkpoint()
+    }
+}
+test "det_attention_report_is_sequence_sensitive" {
+    let left_wire = runtime.session.placeholder_sequence_range_wire(1, 8) let mut right_wire = "" right_wire = runtime.session.append_token_wire(right_wire, 8) right_wire = runtime.session.append_token_wire(right_wire, 7) right_wire = runtime.session.append_token_wire(right_wire, 6) right_wire = runtime.session.append_token_wire(right_wire, 5) right_wire = runtime.session.append_token_wire(right_wire, 4) right_wire = runtime.session.append_token_wire(right_wire, 3) right_wire = runtime.session.append_token_wire(right_wire, 2) right_wire = runtime.session.append_token_wire(right_wire, 1) let shape = model.default_shape() let cfg = runtime.session.config("test-model", 64, 25, 8, 0, "fidelity_paged_kv") let left = runtime.session.state_with_sequence(shape, cfg, left_wire) let right = runtime.session.state_with_sequence(shape, cfg, right_wire) let left_report = attention.report(shape, cfg, left, left_wire, "") let right_report = attention.report(shape, cfg, right, right_wire, "") if left_report.attn_sum_x1000 == right_report.attn_sum_x1000 {
+        checkpoint()
+    }
+}

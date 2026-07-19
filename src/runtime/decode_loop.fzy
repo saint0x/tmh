@@ -1,0 +1,439 @@
+use core.env;
+use core.time;
+
+use kv;
+use model;
+use runtime.session;
+
+fn trace_enabled() -> i32 {
+    if env.get("FPA_TRACE_RUNTIME") == "1" {
+        return 1
+    }
+    return 0
+}
+
+fn trace_line(label: str) {
+    if trace_enabled() == 1 {
+        discard term.write(str.concat(str.concat("FPA_TRACE ", label), "\n"))
+    }
+}
+fn ceil_div(numer: i32, denom: i32) -> i32 {
+    if numer <= 0 || denom <= 0 {
+        return 0
+    }
+    let div = numer / denom if numer% denom == 0 {
+        return div
+    }
+    return div + 1
+}
+fn hot_pages_for_active(active_pages: i32, hot_budget_pct: i32) -> i32 {
+    if active_pages <= 0 || hot_budget_pct <= 0 {
+        return 0
+    }
+    let mut hot = (active_pages * hot_budget_pct) / 100 if (active_pages * hot_budget_pct)% 100 != 0 {
+        hot = hot + 1
+    }
+    if hot < 1 {
+        hot = 1
+    }
+    if hot > active_pages {
+        hot = active_pages
+    }
+    return hot
+}
+struct DecodeResult {
+    policy_name: str,
+    prompt_token_count: i32,
+    generated_tokens: i32,
+    generated_token_ids_wire: str,
+    generated_text: str,
+    effective_bytes_total: i32,
+    block_remap_count_total: i32,
+    copy_on_write_count_total: i32,
+    old_pages_streamed_total: i32,
+    raw_pages_streamed_total: i32,
+    parity_match: i32,
+}
+
+fn result_json(result: DecodeResult) -> str {
+    let mut out = "{\"policy_name\":"
+    out = str.concat(out, json.str(result.policy_name))
+    out = str.concat(out, str.concat(",\"prompt_token_count\":", str.from_i32(result.prompt_token_count)))
+    out = str.concat(out, str.concat(",\"generated_tokens\":", str.from_i32(result.generated_tokens)))
+    out = str.concat(out, str.concat(",\"generated_token_ids_wire\":", json.str(result.generated_token_ids_wire)))
+    out = str.concat(out, str.concat(",\"generated_text\":", json.str(result.generated_text)))
+    out = str.concat(out, str.concat(",\"effective_bytes_total\":", str.from_i32(result.effective_bytes_total)))
+    out = str.concat(out, str.concat(",\"block_remap_count_total\":", str.from_i32(result.block_remap_count_total)))
+    out = str.concat(out, str.concat(",\"copy_on_write_count_total\":", str.from_i32(result.copy_on_write_count_total)))
+    out = str.concat(out, str.concat(",\"old_pages_streamed_total\":", str.from_i32(result.old_pages_streamed_total)))
+    out = str.concat(out, str.concat(",\"raw_pages_streamed_total\":", str.from_i32(result.raw_pages_streamed_total)))
+    out = str.concat(out, str.concat(",\"parity_match\":", str.from_i32(result.parity_match)))
+    return str.concat(out, "}")
+}
+
+fn from_json(raw: str) -> DecodeResult {
+    let payload = json.parse(raw)
+    return DecodeResult {
+        policy_name: json.get_str(payload, "policy_name"),
+        prompt_token_count: model.artifacts.parse_i32(raw_i32_field(raw, "prompt_token_count")),
+        generated_tokens: model.artifacts.parse_i32(raw_i32_field(raw, "generated_tokens")),
+        generated_token_ids_wire: json.get_str(payload, "generated_token_ids_wire"),
+        generated_text: json.get_str(payload, "generated_text"),
+        effective_bytes_total: model.artifacts.parse_i32(raw_i32_field(raw, "effective_bytes_total")),
+        block_remap_count_total: model.artifacts.parse_i32(raw_i32_field(raw, "block_remap_count_total")),
+        copy_on_write_count_total: model.artifacts.parse_i32(raw_i32_field(raw, "copy_on_write_count_total")),
+        old_pages_streamed_total: model.artifacts.parse_i32(raw_i32_field(raw, "old_pages_streamed_total")),
+        raw_pages_streamed_total: model.artifacts.parse_i32(raw_i32_field(raw, "raw_pages_streamed_total")),
+        parity_match: model.artifacts.parse_i32(raw_i32_field(raw, "parity_match")),
+    }
+}
+
+fn wire_from_json(raw: str) -> str {
+    let payload = json.parse(raw)
+    return result_wire(json.get_str(payload, "policy_name"), model.artifacts.parse_i32(raw_i32_field(raw, "prompt_token_count")), model.artifacts.parse_i32(raw_i32_field(raw, "generated_tokens")), json.get_str(payload, "generated_token_ids_wire"), json.get_str(payload, "generated_text"), model.artifacts.parse_i32(raw_i32_field(raw, "effective_bytes_total")), model.artifacts.parse_i32(raw_i32_field(raw, "block_remap_count_total")), model.artifacts.parse_i32(raw_i32_field(raw, "copy_on_write_count_total")), model.artifacts.parse_i32(raw_i32_field(raw, "old_pages_streamed_total")), model.artifacts.parse_i32(raw_i32_field(raw, "raw_pages_streamed_total")), model.artifacts.parse_i32(raw_i32_field(raw, "parity_match")))
+}
+fn raw_i32_field(raw: str, key: str) -> str {
+    let prefix = str.concat(str.concat("\"", key), "\":")
+    let start = model.artifacts.find_substring(raw, prefix)
+    if start < 0 {
+        return "0"
+    }
+    let value_start = start + str.len(prefix)
+    let mut value_end = value_start
+    while value_end < str.len(raw) {
+        let ch = str.slice(raw, value_end, value_end + 1)
+        if ch == "," || ch == "}" {
+            return str.slice(raw, value_start, value_end)
+        }
+        value_end = value_end + 1
+    }
+    return str.slice(raw, value_start, value_end)
+}
+
+fn frame_push(wire: str, value: str) -> str {
+    return runtime.block_manager.frame_push(wire, value)
+}
+
+fn frame_value_at(wire: str, position: i32) -> str {
+    return runtime.block_manager.frame_value_at(wire, position)
+}
+
+fn result_wire(policy_name: str, prompt_token_count: i32, generated_tokens: i32, generated_token_ids_wire: str, generated_text: str, effective_bytes_total: i32, block_remap_count_total: i32, copy_on_write_count_total: i32, old_pages_streamed_total: i32, raw_pages_streamed_total: i32, parity_match: i32) -> str {
+    let mut wire = ""
+    wire = frame_push(wire, policy_name)
+    wire = frame_push(wire, str.from_i32(prompt_token_count))
+    wire = frame_push(wire, str.from_i32(generated_tokens))
+    wire = frame_push(wire, generated_token_ids_wire)
+    wire = frame_push(wire, generated_text)
+    wire = frame_push(wire, str.from_i32(effective_bytes_total))
+    wire = frame_push(wire, str.from_i32(block_remap_count_total))
+    wire = frame_push(wire, str.from_i32(copy_on_write_count_total))
+    wire = frame_push(wire, str.from_i32(old_pages_streamed_total))
+    wire = frame_push(wire, str.from_i32(raw_pages_streamed_total))
+    wire = frame_push(wire, str.from_i32(parity_match))
+    return wire
+}
+
+fn str_field(wire: str, position: i32) -> str {
+    return frame_value_at(wire, position)
+}
+
+fn i32_field(wire: str, position: i32) -> i32 {
+    return model.artifacts.parse_i32(frame_value_at(wire, position))
+}
+
+fn prompt_token_count(wire: str) -> i32 { return i32_field(wire, 1) }
+fn generated_tokens(wire: str) -> i32 { return i32_field(wire, 2) }
+fn generated_token_ids_wire(wire: str) -> str { return str_field(wire, 3) }
+fn generated_text(wire: str) -> str { return str_field(wire, 4) }
+fn effective_bytes_total(wire: str) -> i32 { return i32_field(wire, 5) }
+fn block_remap_count_total(wire: str) -> i32 { return i32_field(wire, 6) }
+fn copy_on_write_count_total(wire: str) -> i32 { return i32_field(wire, 7) }
+fn old_pages_streamed_total(wire: str) -> i32 { return i32_field(wire, 8) }
+fn raw_pages_streamed_total(wire: str) -> i32 { return i32_field(wire, 9) }
+fn parity_match(wire: str) -> i32 { return i32_field(wire, 10) }
+fn tokens_per_sec_from(tokens: i32, elapsed_ms: i32) -> i32 {
+    if tokens <= 0 || elapsed_ms <= 0 {
+        return 0
+    }
+    return (tokens * 1000) / elapsed_ms
+}
+fn timed_wire(result: str, ttft_ms: i32, latency_ms: i32) -> str {
+    let generated = generated_tokens(result)
+    let mut wire = ""
+    wire = frame_push(wire, result)
+    wire = frame_push(wire, str.from_i32(ttft_ms))
+    wire = frame_push(wire, str.from_i32(latency_ms))
+    wire = frame_push(wire, str.from_i32(tokens_per_sec_from(generated, latency_ms)))
+    wire = frame_push(wire, str.from_i32(tokens_per_sec_from(generated - 1, latency_ms - ttft_ms)))
+    return wire
+}
+fn timed_decode_result_wire(wire: str) -> str { return frame_value_at(wire, 0) }
+fn timed_decode_ttft_ms(wire: str) -> i32 { return model.artifacts.parse_i32(frame_value_at(wire, 1)) }
+fn timed_decode_latency_ms(wire: str) -> i32 { return model.artifacts.parse_i32(frame_value_at(wire, 2)) }
+fn timed_decode_tokens_per_sec(wire: str) -> i32 { return model.artifacts.parse_i32(frame_value_at(wire, 3)) }
+fn timed_decode_steady_tokens_per_sec(wire: str) -> i32 { return model.artifacts.parse_i32(frame_value_at(wire, 4)) }
+fn timed_result_json_from_wire(wire: str) -> str {
+    let result_wire = timed_decode_result_wire(wire)
+    let mut out = "{\"policy_name\":"
+    out = str.concat(out, json.str(str_field(result_wire, 0)))
+    out = str.concat(out, str.concat(",\"prompt_token_count\":", frame_value_at(result_wire, 1)))
+    out = str.concat(out, str.concat(",\"generated_tokens\":", frame_value_at(result_wire, 2)))
+    out = str.concat(out, str.concat(",\"generated_token_ids_wire\":", json.str(str_field(result_wire, 3))))
+    out = str.concat(out, str.concat(",\"generated_text\":", json.str(str_field(result_wire, 4))))
+    out = str.concat(out, str.concat(",\"effective_bytes_total\":", frame_value_at(result_wire, 5)))
+    out = str.concat(out, str.concat(",\"block_remap_count_total\":", frame_value_at(result_wire, 6)))
+    out = str.concat(out, str.concat(",\"copy_on_write_count_total\":", frame_value_at(result_wire, 7)))
+    out = str.concat(out, str.concat(",\"old_pages_streamed_total\":", frame_value_at(result_wire, 8)))
+    out = str.concat(out, str.concat(",\"raw_pages_streamed_total\":", frame_value_at(result_wire, 9)))
+    out = str.concat(out, str.concat(",\"parity_match\":", frame_value_at(result_wire, 10)))
+    out = str.concat(out, str.concat(",\"ttft_ms\":", frame_value_at(wire, 1)))
+    out = str.concat(out, str.concat(",\"latency_ms\":", frame_value_at(wire, 2)))
+    out = str.concat(out, str.concat(",\"tokens_per_sec\":", frame_value_at(wire, 3)))
+    out = str.concat(out, str.concat(",\"steady_tokens_per_sec\":", frame_value_at(wire, 4)))
+    return str.concat(out, "}")
+}
+fn timed_wire_from_json(raw: str) -> str {
+    let payload = json.parse(raw)
+    let result = result_wire(
+        json.get_str(payload, "policy_name"),
+        model.artifacts.parse_i32(raw_i32_field(raw, "prompt_token_count")),
+        model.artifacts.parse_i32(raw_i32_field(raw, "generated_tokens")),
+        json.get_str(payload, "generated_token_ids_wire"),
+        json.get_str(payload, "generated_text"),
+        model.artifacts.parse_i32(raw_i32_field(raw, "effective_bytes_total")),
+        model.artifacts.parse_i32(raw_i32_field(raw, "block_remap_count_total")),
+        model.artifacts.parse_i32(raw_i32_field(raw, "copy_on_write_count_total")),
+        model.artifacts.parse_i32(raw_i32_field(raw, "old_pages_streamed_total")),
+        model.artifacts.parse_i32(raw_i32_field(raw, "raw_pages_streamed_total")),
+        model.artifacts.parse_i32(raw_i32_field(raw, "parity_match"))
+    )
+    return timed_wire(
+        result,
+        model.artifacts.parse_i32(raw_i32_field(raw, "ttft_ms")),
+        model.artifacts.parse_i32(raw_i32_field(raw, "latency_ms"))
+    )
+}
+
+fn result_json_from_wire(wire: str) -> str {
+    let mut out = "{\"policy_name\":"
+    out = str.concat(out, json.str(str_field(wire, 0)))
+    out = str.concat(out, str.concat(",\"prompt_token_count\":", frame_value_at(wire, 1)))
+    out = str.concat(out, str.concat(",\"generated_tokens\":", frame_value_at(wire, 2)))
+    out = str.concat(out, str.concat(",\"generated_token_ids_wire\":", json.str(str_field(wire, 3))))
+    out = str.concat(out, str.concat(",\"generated_text\":", json.str(str_field(wire, 4))))
+    out = str.concat(out, str.concat(",\"effective_bytes_total\":", frame_value_at(wire, 5)))
+    out = str.concat(out, str.concat(",\"block_remap_count_total\":", frame_value_at(wire, 6)))
+    out = str.concat(out, str.concat(",\"copy_on_write_count_total\":", frame_value_at(wire, 7)))
+    out = str.concat(out, str.concat(",\"old_pages_streamed_total\":", frame_value_at(wire, 8)))
+    out = str.concat(out, str.concat(",\"raw_pages_streamed_total\":", frame_value_at(wire, 9)))
+    out = str.concat(out, str.concat(",\"parity_match\":", frame_value_at(wire, 10)))
+    return str.concat(out, "}")
+}
+
+fn run_timed_wire_fields_core(loaded: model.model_loader.LoadedModel, model_dir: str, page_tokens: i32, hot_budget_pct: i32, policy_name: str, max_new_tokens: i32, stop_on_eos: i32, eos_token_id: i32, vocab_size: i32, prompt: model.tokenizer_bridge.TokenizedText) -> str {
+    trace_line("decode_loop_begin")
+    if trace_enabled() == 1 {
+        discard term.write(str.concat(str.concat(str.concat(str.concat("FPA_TRACE_DECODE_CFG max_new_tokens=", str.from_i32(max_new_tokens)), " prompt_token_count="), str.from_i32(prompt.token_count)), "\n"))
+    }
+    let prompt_token_count = prompt.token_count
+    let prompt_token_ids_wire = prompt.token_ids_wire
+    let prompt_sum = model.qwen_runner.prompt_checksum(prompt)
+    let act_seed = model.qwen_runner.activation_seed(loaded, prompt_sum)
+    let shape_layer_count = loaded.layer_count
+    let shape_head_count = loaded.head_count
+    let shape_head_dim = loaded.head_dim
+    let shape_context_tokens = loaded.context_tokens
+    let shape_late_layer_start = loaded.shape.late_layer_start
+    let decode_cfg = runtime.session.config(model_dir, page_tokens, hot_budget_pct, prompt_token_count, 0, policy_name)
+    let latency_start = time.monotonic_ms()
+    let mut state_prompt_tokens = prompt_token_count
+    let mut state_decode_tokens = 0
+    let mut state_total_tokens = prompt_token_count
+    let mut state_prefill_pages = ceil_div(prompt_token_count, page_tokens)
+    let mut state_used_pages = ceil_div(prompt_token_count, page_tokens)
+    let mut state_decode_pages = state_used_pages - state_prefill_pages
+    let mut state_tail_page_tokens = 0
+    if prompt_token_count > 0 {
+        state_tail_page_tokens = prompt_token_count% page_tokens
+        if state_tail_page_tokens == 0 {
+            state_tail_page_tokens = page_tokens
+        }
+    }
+    let mut state_hot_pages = hot_pages_for_active(state_used_pages, hot_budget_pct)
+    let mut state_recent_start_page = if state_hot_pages >= state_used_pages {
+        0
+    } else {
+        state_used_pages - state_hot_pages
+    }
+    let mut generated_token_ids_wire = ""
+    let mut generated_tokens = 0
+    let mut effective_bytes_total = 0
+    let mut block_remap_count_total = 0
+    let mut copy_on_write_count_total = 0
+    let mut old_pages_streamed_total = 0
+    let mut raw_pages_streamed_total = 0
+    let mut parity_match = 1
+    let mut ttft_ms = 0
+    while generated_tokens < max_new_tokens {
+        trace_line(str.concat("decode_step_", str.from_i32(generated_tokens)))
+        if trace_enabled() == 1 {
+            discard term.write(str.concat(str.concat(str.concat(str.concat(str.concat("FPA_TRACE_STEP_FIELDS budget=", str.from_i32(hot_budget_pct)), str.concat(" used_pages=", str.from_i32(state_used_pages))), str.concat(" tail_page_tokens=", str.from_i32(state_tail_page_tokens))), str.concat(" total_tokens=", str.from_i32(state_total_tokens))), str.concat(str.concat(" policy=", policy_name), "\n")))
+        }
+        trace_line("decode_state_ready")
+        trace_line("decode_step_cfg_ready")
+        let session_state = runtime.session.state_record(state_prompt_tokens, state_decode_tokens, state_total_tokens, state_prefill_pages, state_decode_pages, state_used_pages, state_tail_page_tokens, hot_budget_pct, state_hot_pages, state_recent_start_page)
+        let manager = runtime.session.manager_of(loaded.shape, policy_name, session_state)
+        trace_line("decode_attention_before")
+        let attention_metrics_wire = runtime.attention_core.metrics_wire_from_manager(loaded.shape, decode_cfg, session_state, prompt_token_ids_wire, generated_token_ids_wire, manager)
+        trace_line("decode_attention_after")
+        let residency_wire = runtime.residency.report_wire_with_manager(loaded.shape, decode_cfg, session_state, manager)
+        trace_line("decode_residency_after")
+        let token_id = model.qwen_runner.top_token_id_with_manager(loaded, prompt_sum, act_seed, generated_tokens, session_state, prompt_token_ids_wire, generated_token_ids_wire, manager, runtime.generation_config.safe_vocab_size(vocab_size))
+        trace_line("decode_token_after")
+        generated_token_ids_wire = model.tokenizer_bridge.append_token_wire(generated_token_ids_wire, token_id)
+        trace_line("decode_append_after")
+        generated_tokens = generated_tokens + 1
+        if generated_tokens == 1 {
+            ttft_ms = time.monotonic_ms() - latency_start
+        }
+        effective_bytes_total = effective_bytes_total + runtime.attention_core.metrics_effective_bytes_read(attention_metrics_wire)
+        block_remap_count_total = block_remap_count_total + runtime.residency.block_remap_count_from_wire(residency_wire)
+        copy_on_write_count_total = copy_on_write_count_total + runtime.residency.copy_on_write_count_from_wire(residency_wire)
+        old_pages_streamed_total = old_pages_streamed_total + runtime.attention_core.metrics_old_pages_streamed(attention_metrics_wire)
+        raw_pages_streamed_total = raw_pages_streamed_total + runtime.attention_core.metrics_raw_pages_streamed(attention_metrics_wire)
+        if runtime.attention_core.metrics_parity_match(attention_metrics_wire) == 0 {
+            parity_match = 0
+        }
+        trace_line("decode_metrics_after")
+        if stop_on_eos == 1 {
+            if token_id == eos_token_id {
+                break
+            }
+        }
+        if generated_tokens >= max_new_tokens {
+            break
+        }
+        state_decode_tokens = state_decode_tokens + 1
+        state_total_tokens = state_prompt_tokens + state_decode_tokens
+        state_used_pages = ceil_div(state_total_tokens, page_tokens)
+        state_decode_pages = state_used_pages - state_prefill_pages
+        state_tail_page_tokens = 0
+        if state_total_tokens > 0 {
+            state_tail_page_tokens = state_total_tokens% page_tokens
+            if state_tail_page_tokens == 0 {
+                state_tail_page_tokens = page_tokens
+            }
+        }
+        state_hot_pages = hot_pages_for_active(state_used_pages, hot_budget_pct)
+        state_recent_start_page = if state_hot_pages >= state_used_pages {
+            0
+        } else {
+            state_used_pages - state_hot_pages
+        }
+        if trace_enabled() == 1 {
+            discard term.write(str.concat(str.concat(str.concat(str.concat(str.concat("FPA_TRACE_STATE_CANONICAL decode_tokens=", str.from_i32(state_decode_tokens)), str.concat(" total_tokens=", str.from_i32(state_total_tokens))), str.concat(" used_pages=", str.from_i32(state_used_pages))), str.concat(" tail_page_tokens=", str.from_i32(state_tail_page_tokens))), "\n"))
+        }
+        trace_line("decode_advance_after")
+    }
+    trace_line("decode_loop_done")
+    let result = result_wire(policy_name, prompt_token_count, generated_tokens, generated_token_ids_wire, model.tokenizer_bridge.decode_wire(generated_token_ids_wire), effective_bytes_total, block_remap_count_total, copy_on_write_count_total, old_pages_streamed_total, raw_pages_streamed_total, parity_match)
+    let latency_ms = time.monotonic_ms() - latency_start
+    return timed_wire(result, ttft_ms, latency_ms)
+}
+fn run_wire_fields(loaded: model.model_loader.LoadedModel, session_cfg: runtime.session.SessionConfig, max_new_tokens: i32, stop_on_eos: i32, eos_token_id: i32, vocab_size: i32, prompt: model.tokenizer_bridge.TokenizedText) -> str {
+    return timed_decode_result_wire(run_timed_wire_fields_core(loaded, session_cfg.model_dir, session_cfg.page_tokens, session_cfg.hot_budget_pct, session_cfg.policy_name, max_new_tokens, stop_on_eos, eos_token_id, vocab_size, prompt))
+}
+fn run_wire_fields_direct(loaded: model.model_loader.LoadedModel, model_dir: str, page_tokens: i32, hot_budget_pct: i32, policy_name: str, max_new_tokens: i32, stop_on_eos: i32, eos_token_id: i32, vocab_size: i32, prompt: model.tokenizer_bridge.TokenizedText) -> str {
+    return timed_decode_result_wire(run_timed_wire_fields_core(loaded, model_dir, page_tokens, hot_budget_pct, policy_name, max_new_tokens, stop_on_eos, eos_token_id, vocab_size, prompt))
+}
+fn run_wire(loaded: model.model_loader.LoadedModel, session_cfg: runtime.session.SessionConfig, generation_cfg: runtime.generation_config.GenerationConfig, prompt: model.tokenizer_bridge.TokenizedText) -> str {
+    if trace_enabled() == 1 {
+        discard term.write(str.concat(str.concat(str.concat("FPA_TRACE_RUN_WIRE cfg_max_new_tokens=", str.from_i32(generation_cfg.max_new_tokens)), str.concat(" cfg_vocab_size=", str.from_i32(generation_cfg.vocab_size))), "\n"))
+    }
+    return run_wire_fields(loaded, session_cfg, generation_cfg.max_new_tokens, generation_cfg.stop_on_eos, generation_cfg.eos_token_id, generation_cfg.vocab_size, prompt)
+}
+fn run_from_prompt_text_policy_wire(model_dir: str, page_tokens: i32, hot_budget_pct: i32, max_new_tokens: i32, policy_name: str, prompt_text: str) -> str {
+    let loaded = model.model_loader.load(model_dir, page_tokens)
+    let prompt = model.tokenizer_bridge.encode(prompt_text, loaded.vocab_size)
+    return run_wire_fields_direct(loaded, model_dir, page_tokens, hot_budget_pct, policy_name, max_new_tokens, 0, 0, loaded.vocab_size, prompt)
+}
+fn run_full_from_prompt_text_wire(model_dir: str, page_tokens: i32, hot_budget_pct: i32, max_new_tokens: i32, prompt_text: str) -> str {
+    return run_from_prompt_text_policy_wire(model_dir, page_tokens, hot_budget_pct, max_new_tokens, "full_kv", prompt_text)
+}
+fn run_recent_from_prompt_text_wire(model_dir: str, page_tokens: i32, hot_budget_pct: i32, max_new_tokens: i32, prompt_text: str) -> str {
+    return run_from_prompt_text_policy_wire(model_dir, page_tokens, hot_budget_pct, max_new_tokens, "recent_only", prompt_text)
+}
+fn run_quantized_from_prompt_text_wire(model_dir: str, page_tokens: i32, hot_budget_pct: i32, max_new_tokens: i32, prompt_text: str) -> str {
+    return run_from_prompt_text_policy_wire(model_dir, page_tokens, hot_budget_pct, max_new_tokens, "quantized_old_kv", prompt_text)
+}
+fn run_fidelity_from_prompt_text_wire(model_dir: str, page_tokens: i32, hot_budget_pct: i32, max_new_tokens: i32, prompt_text: str) -> str {
+    return run_from_prompt_text_policy_wire(model_dir, page_tokens, hot_budget_pct, max_new_tokens, "fidelity_paged_kv", prompt_text)
+}
+
+fn run(loaded: model.model_loader.LoadedModel, session_cfg: runtime.session.SessionConfig, generation_cfg: runtime.generation_config.GenerationConfig, prompt: model.tokenizer_bridge.TokenizedText) -> DecodeResult {
+    return from_json(result_json_from_wire(run_wire(loaded, session_cfg, generation_cfg, prompt)))
+}
+
+fn run_json(loaded: model.model_loader.LoadedModel, session_cfg: runtime.session.SessionConfig, generation_cfg: runtime.generation_config.GenerationConfig, prompt: model.tokenizer_bridge.TokenizedText) -> str {
+    return result_json_from_wire(run_wire(loaded, session_cfg, generation_cfg, prompt))
+}
+
+fn policy_from_name(policy_name: str) -> model.PolicyKind {
+    if policy_name == "recent_only" {
+        return model.PolicyKind::RecentOnly
+    }
+    if policy_name == "quantized_old_kv" {
+        return model.PolicyKind::QuantizedOldKv
+    }
+    if policy_name == "fidelity_paged_kv" {
+        return model.PolicyKind::FidelityPagedKv
+    }
+    return model.PolicyKind::FullKv
+}
+
+fn run_direct(loaded: model.model_loader.LoadedModel, model_dir: str, page_tokens: i32, hot_budget_pct: i32, max_new_tokens: i32, policy_name: str, prompt: model.tokenizer_bridge.TokenizedText) -> DecodeResult {
+    return from_json(result_json_from_wire(run_wire_fields_direct(loaded, model_dir, page_tokens, hot_budget_pct, policy_name, max_new_tokens, 0, 0, loaded.vocab_size, prompt)))
+}
+
+fn run_wire_direct(loaded: model.model_loader.LoadedModel, model_dir: str, page_tokens: i32, hot_budget_pct: i32, max_new_tokens: i32, policy_name: str, prompt: model.tokenizer_bridge.TokenizedText) -> str {
+    if trace_enabled() == 1 {
+        discard term.write(str.concat(str.concat(str.concat(str.concat("FPA_TRACE_RUN_WIRE_DIRECT policy=", policy_name), str.concat(" max_new_tokens_arg=", str.from_i32(max_new_tokens))), str.concat(" prompt_token_count_arg=", str.from_i32(prompt.token_count))), "\n"))
+    }
+    return run_wire_fields_direct(loaded, model_dir, page_tokens, hot_budget_pct, policy_name, max_new_tokens, 0, 0, loaded.vocab_size, prompt)
+}
+fn run_timed_wire_direct(loaded: model.model_loader.LoadedModel, model_dir: str, page_tokens: i32, hot_budget_pct: i32, max_new_tokens: i32, policy_name: str, prompt: model.tokenizer_bridge.TokenizedText) -> str {
+    if trace_enabled() == 1 {
+        discard term.write(str.concat(str.concat(str.concat(str.concat("FPA_TRACE_RUN_TIMED_WIRE_DIRECT policy=", policy_name), str.concat(" max_new_tokens_arg=", str.from_i32(max_new_tokens))), str.concat(" prompt_token_count_arg=", str.from_i32(prompt.token_count))), "\n"))
+    }
+    return run_timed_wire_fields_core(loaded, model_dir, page_tokens, hot_budget_pct, policy_name, max_new_tokens, 0, 0, loaded.vocab_size, prompt)
+}
+fn run_timed_wire_from_prompt_text(model_dir: str, page_tokens: i32, hot_budget_pct: i32, max_new_tokens: i32, policy_name: str, prompt_text: str) -> str {
+    let loaded = model.model_loader.load(model_dir, page_tokens)
+    let prompt = model.tokenizer_bridge.encode(prompt_text, loaded.vocab_size)
+    return run_timed_wire_direct(loaded, model_dir, page_tokens, hot_budget_pct, max_new_tokens, policy_name, prompt)
+}
+
+fn run_from_prompt_text(model_dir: str, page_tokens: i32, hot_budget_pct: i32, max_new_tokens: i32, policy_name: str, prompt_text: str) -> DecodeResult {
+    let loaded = model.model_loader.load(model_dir, page_tokens)
+    let prompt = model.tokenizer_bridge.encode(prompt_text, loaded.vocab_size)
+    return run_direct(loaded, model_dir, page_tokens, hot_budget_pct, max_new_tokens, policy_name, prompt)
+}
+
+fn run_json_direct(loaded: model.model_loader.LoadedModel, model_dir: str, page_tokens: i32, hot_budget_pct: i32, max_new_tokens: i32, policy_name: str, prompt: model.tokenizer_bridge.TokenizedText) -> str {
+    return result_json_from_wire(run_wire_fields_direct(loaded, model_dir, page_tokens, hot_budget_pct, policy_name, max_new_tokens, 0, 0, loaded.vocab_size, prompt))
+}
+
+fn run_json_from_prompt_text(model_dir: str, page_tokens: i32, hot_budget_pct: i32, max_new_tokens: i32, policy_name: str, prompt_text: str) -> str {
+    let loaded = model.model_loader.load(model_dir, page_tokens)
+    let prompt = model.tokenizer_bridge.encode(prompt_text, loaded.vocab_size)
+    return run_json_direct(loaded, model_dir, page_tokens, hot_budget_pct, max_new_tokens, policy_name, prompt)
+}
+
+fn run_wire_from_prompt_text(model_dir: str, page_tokens: i32, hot_budget_pct: i32, max_new_tokens: i32, policy_name: str, prompt_text: str) -> str {
+    let loaded = model.model_loader.load(model_dir, page_tokens)
+    let prompt = model.tokenizer_bridge.encode(prompt_text, loaded.vocab_size)
+    let generation_cfg = runtime.generation_config.config(max_new_tokens, 0, 0, 0, loaded.vocab_size)
+    let session_cfg = runtime.session.config(model_dir, page_tokens, hot_budget_pct, prompt.token_count, 0, policy_name)
+    return run_wire(loaded, session_cfg, generation_cfg, prompt)
+}

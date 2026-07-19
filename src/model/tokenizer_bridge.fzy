@@ -1,0 +1,110 @@
+use model;
+struct TokenizedText {
+    raw_text: str, token_ids_wire: str, token_count: i32, checksum: i32,
+}
+fn token_wire_alphabet() -> str {
+    return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+}
+fn token_wire_width() -> i32 {
+    return 3
+}
+fn alphabet() -> str {
+    return "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,!?;:-_/()[]{}#@+*=\\n"
+}
+fn char_index(ch: str) -> i32 {
+    return model.artifacts.find_substring(alphabet(), ch)
+}
+fn safe_vocab_size(vocab_size: i32) -> i32 {
+    if vocab_size <= 0 {
+        return 4096
+    }
+    return vocab_size
+}
+fn token_wire_char(value: i32) -> str {
+    let alphabet = token_wire_alphabet()
+    let width = str.len(alphabet)
+    if width <= 0 {
+        return "A"
+    }
+    let normalized = if value < 0 {
+        0
+    } else {
+        value% width
+    }
+    return str.slice(alphabet, normalized, normalized + 1)
+}
+fn token_wire_value(ch: str) -> i32 {
+    let idx = model.artifacts.find_substring(token_wire_alphabet(), ch)
+    if idx < 0 {
+        return 0
+    }
+    return idx
+}
+fn encode_token_wire(token_id: i32) -> str {
+    let safe = if token_id < 0 {
+        0
+    } else {
+        token_id
+    }
+    let high = (safe / 4096)% 64
+    let mid = (safe / 64)% 64
+    let low = safe% 64
+    return str.concat(str.concat(token_wire_char(high), token_wire_char(mid)), token_wire_char(low))
+}
+fn token_id_from_wire(token_ids_wire: str, position: i32) -> i32 {
+    if token_ids_wire == "" || position < 0 {
+        return 0
+    }
+    let width = token_wire_width()
+    let start = position * width
+    if start + width > str.len(token_ids_wire) {
+        return 0
+    }
+    let high = token_wire_value(str.slice(token_ids_wire, start, start + 1))
+    let mid = token_wire_value(str.slice(token_ids_wire, start + 1, start + 2))
+    let low = token_wire_value(str.slice(token_ids_wire, start + 2, start + 3))
+    return(high * 4096) + (mid * 64) + low
+}
+fn encode(text: str, vocab_size: i32) -> TokenizedText {
+    let safe_vocab = safe_vocab_size(vocab_size) let mut idx = 0 let mut checksum = 0 let mut token_count = 0 let mut wire = "" while idx < str.len(text) {
+        let ch = str.slice(text, idx, idx + 1) let raw_index = char_index(ch) let normalized = if raw_index >= 0 {
+            raw_index + 1
+        } else {
+            (idx% 97) + 3
+        }
+        let token_id = ((normalized * 17) + (idx * 13) + str.len(text))% safe_vocab
+        wire = str.concat(wire, encode_token_wire(token_id))
+        checksum = checksum + (token_id * (idx + 1)) token_count = token_count + 1 idx = idx + 1
+    }
+    return TokenizedText {
+        raw_text: text, token_ids_wire: wire, token_count: token_count, checksum: checksum,
+    }
+}
+fn token_count(tokenized: TokenizedText) -> i32 {
+    return tokenized.token_count
+}
+fn decode_char(token_id: i32) -> str {
+    let chars = alphabet() let size = str.len(chars) if size <= 0 {
+        return "?"
+    }
+    let normalized = if token_id < 0 {
+        0 - token_id
+    } else {
+        token_id
+    }
+    let idx = normalized% size return str.slice(chars, idx, idx + 1)
+}
+fn decode_wire(token_ids_wire: str) -> str {
+    if token_ids_wire == "" {
+        return ""
+    }
+    let width = token_wire_width()
+    let mut out = "" let mut position = 0 while (position * width) + width <= str.len(token_ids_wire) {
+        out = str.concat(out, decode_char(token_id_from_wire(token_ids_wire, position)))
+        position = position + 1
+    }
+    return out
+}
+fn append_token_wire(token_ids_wire: str, token_id: i32) -> str {
+    return str.concat(token_ids_wire, encode_token_wire(token_id))
+}

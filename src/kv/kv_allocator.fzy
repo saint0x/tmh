@@ -1,0 +1,25 @@
+use kv;
+use model;
+fn raw_k_bytes_per_page(shape: model.EngineShape) -> i32 {
+    return shape.page_tokens * shape.head_count * shape.head_dim * 2
+}
+fn raw_v_bytes_per_page(shape: model.EngineShape) -> i32 {
+    return shape.page_tokens * shape.head_count * shape.head_dim * 2
+}
+fn precision_divisor(precision: kv.kv_page.Precision) -> i32 {
+    match precision {
+        kv.kv_page.Precision::Raw => return 1, kv.kv_page.Precision::Int8 => return 2, kv.kv_page.Precision::Int4 => return 4, _ => return 1,
+    }
+}
+fn encoded_k_bytes(shape: model.EngineShape, precision: kv.kv_page.Precision) -> i32 {
+    if precision == kv.kv_page.Precision::Dropped {
+        return 0
+    }
+    return raw_k_bytes_per_page(shape) / precision_divisor(precision)
+}
+fn encoded_v_bytes(shape: model.EngineShape, precision: kv.kv_page.Precision) -> i32 {
+    if precision == kv.kv_page.Precision::Dropped {
+        return 0
+    }
+    return raw_v_bytes_per_page(shape) / precision_divisor(precision)
+}

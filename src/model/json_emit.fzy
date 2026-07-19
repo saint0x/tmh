@@ -1,0 +1,7 @@
+fn i32(value: i32) -> str {
+    return str.from_i32(value)
+}
+
+fn raw(encoded: str) -> str {
+    return encoded
+}

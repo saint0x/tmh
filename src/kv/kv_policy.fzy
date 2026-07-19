@@ -1,0 +1,62 @@
+use kv;
+use model;
+use model.artifacts;
+fn is_hot_page(shape: model.EngineShape, cfg: model.artifacts.RuntimeConfig, page_id: i32) -> i32 {
+    if cfg.hot_pages <= 0 {
+        return 0
+    }
+    let active_pages = if cfg.active_pages > 0 {
+        cfg.active_pages
+    } else {
+        model.total_pages(shape)
+    }
+    let recent_start = active_pages - cfg.hot_pages if page_id >= recent_start {
+        return 1
+    }
+    return 0
+}
+fn role_for_page(shape: model.EngineShape, cfg: model.artifacts.RuntimeConfig, layer_id: i32, page_id: i32) -> kv.kv_page.PageRole {
+    if is_hot_page(shape, cfg, page_id) == 1 {
+        return kv.kv_page.PageRole::Recent
+    }
+    if layer_id >= shape.late_layer_start {
+        return kv.kv_page.PageRole::LateLayerProtected
+    }
+    return kv.kv_page.PageRole::Old
+}
+fn k_precision_for(shape: model.EngineShape, cfg: model.artifacts.RuntimeConfig, layer_id: i32, page_id: i32) -> kv.kv_page.Precision {
+    let _layer_id = layer_id if cfg.policy_name == "full_kv" {
+        return kv.kv_page.Precision::Raw
+    }
+    if cfg.policy_name == "paged_full_kv" {
+        return kv.kv_page.Precision::Raw
+    }
+    if is_hot_page(shape, cfg, page_id) == 1 {
+        return kv.kv_page.Precision::Raw
+    }
+    if cfg.policy_name == "recent_only" {
+        return kv.kv_page.Precision::Dropped
+    }
+    return kv.kv_page.Precision::Int8
+}
+fn v_precision_for(shape: model.EngineShape, cfg: model.artifacts.RuntimeConfig, layer_id: i32, page_id: i32) -> kv.kv_page.Precision {
+    if cfg.policy_name == "full_kv" {
+        return kv.kv_page.Precision::Raw
+    }
+    if cfg.policy_name == "paged_full_kv" {
+        return kv.kv_page.Precision::Raw
+    }
+    if is_hot_page(shape, cfg, page_id) == 1 {
+        return kv.kv_page.Precision::Raw
+    }
+    if cfg.policy_name == "recent_only" {
+        return kv.kv_page.Precision::Dropped
+    }
+    if cfg.policy_name == "quantized_old_kv" {
+        return kv.kv_page.Precision::Int8
+    }
+    if layer_id >= shape.late_layer_start {
+        return kv.kv_page.Precision::Int8
+    }
+    return kv.kv_page.Precision::Int4
+}

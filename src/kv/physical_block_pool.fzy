@@ -1,0 +1,294 @@
+use kv;
+use model;
+struct PhysicalKVBlock {
+    physical_block_id: i32, layer_id: i32, start_token: i32, token_count: i32, k_precision_name: str, v_precision_name: str, role_name: str, is_hot: i32, refcount: i32, is_shared: i32, is_immutable: i32, generation: i32,
+}
+fn k_precision_of(block: PhysicalKVBlock) -> kv.kv_page.Precision {
+    return kv.kv_page.precision_from_name(block.k_precision_name)
+}
+fn v_precision_of(block: PhysicalKVBlock) -> kv.kv_page.Precision {
+    return kv.kv_page.precision_from_name(block.v_precision_name)
+}
+fn role_of(block: PhysicalKVBlock) -> kv.kv_page.PageRole {
+    return kv.kv_page.role_from_name(block.role_name)
+}
+struct PhysicalBlockPool {
+    blocks_wire: str, free_ids_wire: str, next_block_id: i32, live_blocks: i32, total_allocations: i32, total_frees: i32,
+}
+struct AllocationResult {
+    pool: PhysicalBlockPool, physical_block_id: i32,
+}
+fn frame_push(wire: str, value: str) -> str {
+    return str.concat(str.concat(str.concat(wire, str.from_i32(str.len(value))), "#"), value)
+}
+fn frame_sep(wire: str, start: i32) -> i32 {
+    let mut idx = start while idx < str.len(wire) {
+        if str.slice(wire, idx, idx + 1) == "#" {
+            return idx
+        }
+        idx = idx + 1
+    }
+    return - 1
+}
+fn frame_value_at(wire: str, position: i32) -> str {
+    if position < 0 {
+        return ""
+    }
+    let mut current = 0 let mut idx = 0 while idx < str.len(wire) {
+        let sep = frame_sep(wire, idx) if sep < 0 {
+            return ""
+        }
+        let size = model.artifacts.parse_i32(str.slice(wire, idx, sep)) let start = sep + 1 let end = start + size if current == position {
+            return str.slice(wire, start, end)
+        }
+        current = current + 1 idx = end
+    }
+    return ""
+}
+fn block_i32_field(raw: str, position: i32) -> i32 {
+    return model.artifacts.parse_i32(frame_value_at(raw, position))
+}
+fn block_str_field(raw: str, position: i32) -> str {
+    return frame_value_at(raw, position)
+}
+fn block_layer_id_from_wire(raw: str) -> i32 { return block_i32_field(raw, 1) }
+fn block_start_token_from_wire(raw: str) -> i32 { return block_i32_field(raw, 2) }
+fn block_token_count_from_wire(raw: str) -> i32 { return block_i32_field(raw, 3) }
+fn block_k_precision_name_from_wire(raw: str) -> str { return block_str_field(raw, 4) }
+fn block_v_precision_name_from_wire(raw: str) -> str { return block_str_field(raw, 5) }
+fn block_role_name_from_wire(raw: str) -> str { return block_str_field(raw, 6) }
+fn block_is_hot_from_wire(raw: str) -> i32 { return block_i32_field(raw, 7) }
+fn block_refcount_from_wire(raw: str) -> i32 { return block_i32_field(raw, 8) }
+fn block_is_shared_from_wire(raw: str) -> i32 { return block_i32_field(raw, 9) }
+fn block_is_immutable_from_wire(raw: str) -> i32 { return block_i32_field(raw, 10) }
+fn block_generation_from_wire(raw: str) -> i32 { return block_i32_field(raw, 11) }
+fn create() -> PhysicalBlockPool {
+    return PhysicalBlockPool {
+        blocks_wire: "", free_ids_wire: "", next_block_id: 0, live_blocks: 0, total_allocations: 0, total_frees: 0,
+    }
+}
+fn sequence_len(wire: str) -> i32 {
+    return list.len(parse_sequence(wire))
+}
+fn sequence_at(wire: str, position: i32) -> str {
+    let items = parse_sequence(wire) if position < 0 {
+        return ""
+    }
+    if position >= list.len(items) {
+        return ""
+    }
+    return list.get(items, position)
+}
+fn parse_sequence(wire: str) -> ListHandle {
+    if wire == "" {
+        return list.new()
+    }
+    return json.to_list(json.parse(wire))
+}
+fn join_sequence(items: ListHandle) -> str {
+    let encoded = list.new() let mut idx = 0 while idx < list.len(items) {
+        discard list.push(encoded, json.str(list.get(items, idx))) idx = idx + 1
+    }
+    return json.array(encoded)
+}
+fn clone_list_with_replace(items: ListHandle, position: i32, entry: str) -> ListHandle {
+    let next = list.new() let mut idx = 0 while idx < list.len(items) {
+        if idx == position {
+            discard list.push(next, entry)
+        } else {
+            discard list.push(next, list.get(items, idx))
+        }
+        idx = idx + 1
+    }
+    return next
+}
+fn clone_list_without_last(items: ListHandle) -> ListHandle {
+    let next = list.new() let mut idx = 0 while idx + 1 < list.len(items) {
+        discard list.push(next, list.get(items, idx)) idx = idx + 1
+    }
+    return next
+}
+fn clone_list_with_append(items: ListHandle, entry: str) -> ListHandle {
+    let next = list.new() let mut idx = 0 while idx < list.len(items) {
+        discard list.push(next, list.get(items, idx)) idx = idx + 1
+    }
+    discard list.push(next, entry) return next
+}
+fn sequence_append(wire: str, entry: str) -> str {
+    return join_sequence(clone_list_with_append(parse_sequence(wire), entry))
+}
+fn sequence_replace(wire: str, position: i32, entry: str) -> str {
+    return join_sequence(clone_list_with_replace(parse_sequence(wire), position, entry))
+}
+fn sequence_without_last(wire: str) -> str {
+    return join_sequence(clone_list_without_last(parse_sequence(wire)))
+}
+fn from_wire(blocks_wire: str, free_ids_wire: str, next_block_id: i32, live_blocks: i32, total_allocations: i32, total_frees: i32) -> PhysicalBlockPool {
+    return PhysicalBlockPool {
+        blocks_wire: blocks_wire, free_ids_wire: free_ids_wire, next_block_id: next_block_id, live_blocks: live_blocks, total_allocations: total_allocations, total_frees: total_frees,
+    }
+}
+fn block_json(block: PhysicalKVBlock) -> str {
+    let payload = map.new() discard map.set(payload, "physical_block_id", model.json_emit.i32(block.physical_block_id)) discard map.set(payload, "layer_id", model.json_emit.i32(block.layer_id)) discard map.set(payload, "start_token", model.json_emit.i32(block.start_token)) discard map.set(payload, "token_count", model.json_emit.i32(block.token_count)) discard map.set(payload, "k_precision", json.str(block.k_precision_name)) discard map.set(payload, "v_precision", json.str(block.v_precision_name)) discard map.set(payload, "role", json.str(block.role_name)) discard map.set(payload, "is_hot", model.json_emit.i32(block.is_hot)) discard map.set(payload, "refcount", model.json_emit.i32(block.refcount)) discard map.set(payload, "is_shared", model.json_emit.i32(block.is_shared)) discard map.set(payload, "is_immutable", model.json_emit.i32(block.is_immutable)) discard map.set(payload, "generation", model.json_emit.i32(block.generation)) return json.object(payload)
+}
+fn block_wire(block: PhysicalKVBlock) -> str {
+    let mut out = "" out = frame_push(out, str.from_i32(block.physical_block_id)) out = frame_push(out, str.from_i32(block.layer_id)) out = frame_push(out, str.from_i32(block.start_token)) out = frame_push(out, str.from_i32(block.token_count)) out = frame_push(out, block.k_precision_name) out = frame_push(out, block.v_precision_name) out = frame_push(out, block.role_name) out = frame_push(out, str.from_i32(block.is_hot)) out = frame_push(out, str.from_i32(block.refcount)) out = frame_push(out, str.from_i32(block.is_shared)) out = frame_push(out, str.from_i32(block.is_immutable)) out = frame_push(out, str.from_i32(block.generation)) return out
+}
+fn null_block(physical_block_id: i32) -> PhysicalKVBlock {
+    return PhysicalKVBlock {
+        physical_block_id: physical_block_id, layer_id: 0, start_token: 0, token_count: 0, k_precision_name: "dropped", v_precision_name: "dropped", role_name: "old", is_hot: 0, refcount: 0, is_shared: 0, is_immutable: 0, generation: 0,
+    }
+}
+fn from_json(raw: str) -> PhysicalKVBlock {
+    if str.contains(raw, "\"physical_block_id\"") != 1 {
+        return PhysicalKVBlock {
+            physical_block_id: model.artifacts.parse_i32(frame_value_at(raw, 0)), layer_id: model.artifacts.parse_i32(frame_value_at(raw, 1)), start_token: model.artifacts.parse_i32(frame_value_at(raw, 2)), token_count: model.artifacts.parse_i32(frame_value_at(raw, 3)), k_precision_name: frame_value_at(raw, 4), v_precision_name: frame_value_at(raw, 5), role_name: frame_value_at(raw, 6), is_hot: model.artifacts.parse_i32(frame_value_at(raw, 7)), refcount: model.artifacts.parse_i32(frame_value_at(raw, 8)), is_shared: model.artifacts.parse_i32(frame_value_at(raw, 9)), is_immutable: model.artifacts.parse_i32(frame_value_at(raw, 10)), generation: model.artifacts.parse_i32(frame_value_at(raw, 11)),
+        }
+    }
+    let payload = json.parse(raw) return PhysicalKVBlock {
+        physical_block_id: model.artifacts.parse_i32(json.get_str(payload, "physical_block_id")), layer_id: model.artifacts.parse_i32(json.get_str(payload, "layer_id")), start_token: model.artifacts.parse_i32(json.get_str(payload, "start_token")), token_count: model.artifacts.parse_i32(json.get_str(payload, "token_count")), k_precision_name: json.get_str(payload, "k_precision"), v_precision_name: json.get_str(payload, "v_precision"), role_name: json.get_str(payload, "role"), is_hot: model.artifacts.parse_i32(json.get_str(payload, "is_hot")), refcount: model.artifacts.parse_i32(json.get_str(payload, "refcount")), is_shared: model.artifacts.parse_i32(json.get_str(payload, "is_shared")), is_immutable: model.artifacts.parse_i32(json.get_str(payload, "is_immutable")), generation: model.artifacts.parse_i32(json.get_str(payload, "generation")),
+    }
+}
+fn block_at(pool: PhysicalBlockPool, physical_block_id: i32) -> PhysicalKVBlock {
+    if physical_block_id < 0 {
+        return null_block(physical_block_id)
+    }
+    if physical_block_id >= sequence_len(pool.blocks_wire) {
+        return null_block(physical_block_id)
+    }
+    return from_json(sequence_at(pool.blocks_wire, physical_block_id))
+}
+fn rebuild_blocks_with(pool: PhysicalBlockPool, physical_block_id: i32, updated: PhysicalKVBlock) -> str {
+    return sequence_replace(pool.blocks_wire, physical_block_id, block_wire(updated))
+}
+fn update_block(pool: PhysicalBlockPool, updated: PhysicalKVBlock) -> PhysicalBlockPool {
+    let blocks_wire = rebuild_blocks_with(pool, updated.physical_block_id, updated) return PhysicalBlockPool {
+        blocks_wire: blocks_wire, free_ids_wire: pool.free_ids_wire, next_block_id: pool.next_block_id, live_blocks: pool.live_blocks, total_allocations: pool.total_allocations, total_frees: pool.total_frees,
+    }
+}
+fn pop_free_id(pool: PhysicalBlockPool) -> AllocationResult {
+    let free_len = sequence_len(pool.free_ids_wire) if free_len <= 0 {
+        return AllocationResult {
+            pool: pool, physical_block_id: - 1,
+        }
+    }
+    let free_ids_wire = sequence_without_last(pool.free_ids_wire) return AllocationResult {
+        pool: PhysicalBlockPool {
+            blocks_wire: pool.blocks_wire, free_ids_wire: free_ids_wire, next_block_id: pool.next_block_id, live_blocks: pool.live_blocks, total_allocations: pool.total_allocations, total_frees: pool.total_frees,
+        }
+        , physical_block_id: model.artifacts.parse_i32(sequence_at(pool.free_ids_wire, free_len - 1)),
+    }
+}
+fn allocate(pool: PhysicalBlockPool, layer_id: i32, start_token: i32, token_count: i32, k_precision_name: str, v_precision_name: str, role_name: str, is_hot: i32, is_shared: i32, is_immutable: i32, generation: i32) -> AllocationResult {
+    let maybe_reused = pop_free_id(pool) let physical_block_id = if maybe_reused.physical_block_id >= 0 {
+        maybe_reused.physical_block_id
+    } else {
+        pool.next_block_id
+    }
+    let block = PhysicalKVBlock {
+        physical_block_id: physical_block_id, layer_id: layer_id, start_token: start_token, token_count: token_count, k_precision_name: k_precision_name, v_precision_name: v_precision_name, role_name: role_name, is_hot: is_hot, refcount: 0, is_shared: is_shared, is_immutable: is_immutable, generation: generation,
+    }
+    if maybe_reused.physical_block_id >= 0 {
+        let updated_pool = update_block(maybe_reused.pool, block) return AllocationResult {
+            pool: PhysicalBlockPool {
+                blocks_wire: updated_pool.blocks_wire, free_ids_wire: updated_pool.free_ids_wire, next_block_id: updated_pool.next_block_id, live_blocks: updated_pool.live_blocks + 1, total_allocations: updated_pool.total_allocations + 1, total_frees: updated_pool.total_frees,
+            }
+            , physical_block_id: physical_block_id,
+        }
+    }
+    let blocks_wire = sequence_append(pool.blocks_wire, block_wire(block)) return AllocationResult {
+        pool: PhysicalBlockPool {
+            blocks_wire: blocks_wire, free_ids_wire: pool.free_ids_wire, next_block_id: pool.next_block_id + 1, live_blocks: pool.live_blocks + 1, total_allocations: pool.total_allocations + 1, total_frees: pool.total_frees,
+        }
+        , physical_block_id: physical_block_id,
+    }
+}
+fn increment_refcount(pool: PhysicalBlockPool, physical_block_id: i32) -> PhysicalBlockPool {
+    let current = block_at(pool, physical_block_id) return update_block(pool, PhysicalKVBlock {
+        physical_block_id: current.physical_block_id, layer_id: current.layer_id, start_token: current.start_token, token_count: current.token_count, k_precision_name: current.k_precision_name, v_precision_name: current.v_precision_name, role_name: current.role_name, is_hot: current.is_hot, refcount: current.refcount + 1, is_shared: if current.refcount + 1 > 1 {
+            1
+        } else {
+            current.is_shared
+        }
+        , is_immutable: if current.refcount + 1 > 1 {
+            1
+        } else {
+            current.is_immutable
+        }
+        , generation: current.generation,
+    }
+    )
+}
+fn decrement_refcount(pool: PhysicalBlockPool, physical_block_id: i32) -> PhysicalBlockPool {
+    let current = block_at(pool, physical_block_id) let next_refcount = if current.refcount <= 0 {
+        0
+    } else {
+        current.refcount - 1
+    }
+    let updated = update_block(pool, PhysicalKVBlock {
+        physical_block_id: current.physical_block_id, layer_id: current.layer_id, start_token: current.start_token, token_count: current.token_count, k_precision_name: current.k_precision_name, v_precision_name: current.v_precision_name, role_name: current.role_name, is_hot: current.is_hot, refcount: next_refcount, is_shared: if next_refcount > 1 {
+            1
+        } else {
+            0
+        }
+        , is_immutable: if next_refcount > 1 {
+            1
+        } else {
+            current.is_immutable
+        }
+        , generation: current.generation,
+    }
+    ) if next_refcount > 0 {
+        return updated
+    }
+    let freed = update_block(updated, null_block(physical_block_id)) let free_ids_wire = sequence_append(freed.free_ids_wire, str.from_i32(physical_block_id)) return PhysicalBlockPool {
+        blocks_wire: freed.blocks_wire, free_ids_wire: free_ids_wire, next_block_id: freed.next_block_id, live_blocks: if freed.live_blocks > 0 {
+            freed.live_blocks - 1
+        } else {
+            0
+        }
+        , total_allocations: freed.total_allocations, total_frees: freed.total_frees + 1,
+    }
+}
+fn set_token_count(pool: PhysicalBlockPool, physical_block_id: i32, token_count: i32) -> PhysicalBlockPool {
+    let current = block_at(pool, physical_block_id) return update_block(pool, PhysicalKVBlock {
+        physical_block_id: current.physical_block_id, layer_id: current.layer_id, start_token: current.start_token, token_count: token_count, k_precision_name: current.k_precision_name, v_precision_name: current.v_precision_name, role_name: current.role_name, is_hot: current.is_hot, refcount: current.refcount, is_shared: current.is_shared, is_immutable: current.is_immutable, generation: current.generation,
+    }
+    )
+}
+fn set_residency(pool: PhysicalBlockPool, physical_block_id: i32, k_precision_name: str, v_precision_name: str, role_name: str, is_hot: i32, generation: i32) -> PhysicalBlockPool {
+    let current = block_at(pool, physical_block_id) return update_block(pool, PhysicalKVBlock {
+        physical_block_id: current.physical_block_id, layer_id: current.layer_id, start_token: current.start_token, token_count: current.token_count, k_precision_name: k_precision_name, v_precision_name: v_precision_name, role_name: role_name, is_hot: is_hot, refcount: current.refcount, is_shared: current.is_shared, is_immutable: current.is_immutable, generation: generation,
+    }
+    )
+}
+fn blocks_len(wire: str) -> i32 {
+    return sequence_len(wire)
+}
+fn block_segment(wire: str, position: i32) -> str {
+    return sequence_at(wire, position)
+}
+fn free_ids_len(wire: str) -> i32 {
+    return sequence_len(wire)
+}
+fn free_id_segment(wire: str, position: i32) -> str {
+    return sequence_at(wire, position)
+}
+fn set_shared_immutable(pool: PhysicalBlockPool, physical_block_id: i32, is_shared: i32, is_immutable: i32) -> PhysicalBlockPool {
+    let current = block_at(pool, physical_block_id) return update_block(pool, PhysicalKVBlock {
+        physical_block_id: current.physical_block_id, layer_id: current.layer_id, start_token: current.start_token, token_count: current.token_count, k_precision_name: current.k_precision_name, v_precision_name: current.v_precision_name, role_name: current.role_name, is_hot: current.is_hot, refcount: current.refcount, is_shared: is_shared, is_immutable: is_immutable, generation: current.generation,
+    }
+    )
+}
+fn encoded_bytes(shape: model.EngineShape, block: PhysicalKVBlock) -> i32 {
+    return kv.kv_allocator.encoded_k_bytes(shape, k_precision_of(block)) + kv.kv_allocator.encoded_v_bytes(shape, v_precision_of(block))
+}
+fn raw_equivalent_bytes(shape: model.EngineShape, block: PhysicalKVBlock) -> i32 {
+    let _block = block return kv.kv_allocator.raw_k_bytes_per_page(shape) + kv.kv_allocator.raw_v_bytes_per_page(shape)
+}
+fn encoded_bytes_from_wire(shape: model.EngineShape, raw: str) -> i32 {
+    return kv.kv_allocator.encoded_k_bytes(shape, kv.kv_page.precision_from_name(block_k_precision_name_from_wire(raw))) + kv.kv_allocator.encoded_v_bytes(shape, kv.kv_page.precision_from_name(block_v_precision_name_from_wire(raw)))
+}
+fn raw_equivalent_bytes_from_wire(shape: model.EngineShape, raw: str) -> i32 {
+    let _raw = raw return kv.kv_allocator.raw_k_bytes_per_page(shape) + kv.kv_allocator.raw_v_bytes_per_page(shape)
+}

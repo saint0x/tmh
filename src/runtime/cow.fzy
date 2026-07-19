@@ -1,0 +1,18 @@
+use kv;
+struct CowResult {
+    pool: kv.physical_block_pool.PhysicalBlockPool, table: kv.logical_block_table.LogicalBlockTable, copied: i32,
+}
+fn ensure_private_mapping(pool: kv.physical_block_pool.PhysicalBlockPool, table: kv.logical_block_table.LogicalBlockTable, logical_block_id: i32) -> CowResult {
+    let reference = kv.logical_block_table.ref_at(table, logical_block_id) let current = kv.physical_block_pool.block_at(pool, reference.physical_block_id) if current.refcount <= 1 {
+        if current.is_immutable == 0 {
+            if current.is_shared == 0 {
+                return CowResult {
+                    pool: pool, table: table, copied: 0,
+                }
+            }
+        }
+    }
+    let replacement = kv.physical_block_pool.allocate(pool, current.layer_id, current.start_token, current.token_count, current.k_precision_name, current.v_precision_name, current.role_name, current.is_hot, 0, 0, current.generation + 1,) let with_ref = kv.physical_block_pool.increment_refcount(replacement.pool, replacement.physical_block_id) let detached = kv.physical_block_pool.decrement_refcount(with_ref, current.physical_block_id) return CowResult {
+        pool: detached, table: kv.logical_block_table.replace_mapping(table, logical_block_id, replacement.physical_block_id, reference.token_count), copied: 1,
+    }
+}

@@ -1,0 +1,1191 @@
+use core.env;
+use core.fs;
+use core.io;
+use core.path;
+use core.proc;
+use core.process;
+use bench.metrics;
+use bench.stress_suite;
+use model;
+use runtime.decode_loop;
+fn trace_enabled() -> i32 {
+    if env.get("FPA_TRACE_RUNTIME") == "1" {
+        return 1
+    }
+    return 0
+}
+fn trace_line(label: str) {
+    if trace_enabled() == 1 {
+        discard term.write(str.concat(str.concat("FPA_TRACE ", label), "\n"))
+    }
+}
+fn bench_budget_bundle_payload(raw: str) -> str {
+    return tagged_frame_payload(raw, "FPA_BENCH_BUDGET ")
+}
+fn bench_limit(total: i32) -> i32 {
+    let raw = env.get("FPA_BENCH_LIMIT") if raw == "" {
+        return total
+    }
+    let parsed = model.artifacts.parse_i32(raw) if parsed <= 0 {
+        return total
+    }
+    if parsed < total {
+        return parsed
+    }
+    return total
+}
+fn bench_offset(total: i32) -> i32 {
+    let raw = env.get("FPA_BENCH_OFFSET")
+    if raw == "" {
+        return 0
+    }
+    let parsed = model.artifacts.parse_i32(raw)
+    if parsed <= 0 {
+        return 0
+    }
+    if parsed >= total {
+        return total
+    }
+    return parsed
+}
+fn bench_budget_timeout_ms(model_dir: str) -> i32 {
+    let configured = env.get("FPA_BENCH_TIMEOUT_MS")
+    if configured != "" {
+        let parsed = model.artifacts.parse_i32(configured)
+        if parsed > 0 {
+            return parsed
+        }
+    }
+    let suite_size = bench_limit(bench.stress_suite.count(bench.stress_suite.selected_suite_wire(model_dir)))
+    let scaled = suite_size * 10000
+    if scaled < 300000 {
+        return 300000
+    }
+    return scaled
+}
+fn smoke_profile_enabled(model_dir: str) -> i32 {
+    let profile = env.get("FPA_BENCH_PROFILE")
+    if profile == "smoke" {
+        return 1
+    }
+    if profile == "full" {
+        return 0
+    }
+    return 0
+}
+struct PolicyAggregate {
+    policy_name: str, sample_count: i32, exact_match_count: i32, contains_target_count: i32, matching_tokens: i32, total_tokens: i32, top1_agreement_pct: i32, avg_effective_bytes_per_token: i32, avg_block_remaps_per_sample: i32, avg_old_pages_streamed: i32, avg_raw_pages_streamed: i32, avg_ttft_ms: i32, avg_latency_ms: i32, avg_tokens_per_sec: i32, avg_steady_tokens_per_sec: i32,
+}
+struct BenchmarkReport {
+    budget_label: str, hot_budget_pct: i32, suite_size: i32, full_kv: PolicyAggregate, paged_full_kv: PolicyAggregate, recent_only: PolicyAggregate, quantized_old_kv: PolicyAggregate, fidelity_paged_kv: PolicyAggregate,
+}
+struct SampleRow {
+    budget_label: str, hot_budget_pct: i32, sample_id: str, category: str, policy_name: str, prompt_text: str, target_hint: str, prompt_token_count: i32, generated_tokens: i32, generated_text: str, generated_token_ids_wire: str, baseline_generated_text: str, baseline_generated_token_ids_wire: str, exact_match: i32, contains_target: i32, matching_tokens: i32, total_tokens: i32, top1_agreement_pct: i32, edit_distance: i32, effective_bytes_total: i32, block_remap_count_total: i32, copy_on_write_count_total: i32, old_pages_streamed_total: i32, raw_pages_streamed_total: i32, parity_match: i32, ttft_ms: i32, latency_ms: i32, tokens_per_sec: i32, steady_tokens_per_sec: i32,
+}
+struct BenchmarkArtifacts {
+    report: BenchmarkReport, sample_rows_wire: str, failure_rows_wire: str,
+}
+struct BenchmarkMatrixArtifacts {
+    budget_count: i32, budget_reports_wire: str, sample_rows_wire: str, failure_rows_wire: str,
+}
+struct FrameRead {
+    value: str, next_idx: i32,
+}
+fn decimal_digit(ch: str) -> i32 {
+    if ch == "0" {
+        return 0
+    }
+    if ch == "1" {
+        return 1
+    }
+    if ch == "2" {
+        return 2
+    }
+    if ch == "3" {
+        return 3
+    }
+    if ch == "4" {
+        return 4
+    }
+    if ch == "5" {
+        return 5
+    }
+    if ch == "6" {
+        return 6
+    }
+    if ch == "7" {
+        return 7
+    }
+    if ch == "8" {
+        return 8
+    }
+    if ch == "9" {
+        return 9
+    }
+    return - 1
+}
+fn parse_decimal(raw: str) -> i32 {
+    if raw == "" {
+        return 0
+    }
+    let mut sign = 1 let mut idx = 0 if str.slice(raw, 0, 1) == "-" {
+        sign = - 1 idx = 1
+    }
+    let mut value = 0 while idx < str.len(raw) {
+        let digit = decimal_digit(str.slice(raw, idx, idx + 1)) if digit < 0 {
+            return sign * value
+        }
+        value = (value * 10) + digit idx = idx + 1
+    }
+    return sign * value
+}
+fn take_chars(raw: str, start: i32, count: i32) -> str {
+    if count <= 0 {
+        return ""
+    }
+    let mut idx = start let mut taken = 0 let mut out = "" while idx < str.len(raw) && taken < count {
+        out = str.concat(out, str.slice(raw, idx, idx + 1)) idx = idx + 1 taken = taken + 1
+    }
+    return out
+}
+fn line_payload(raw: str, prefix: str) -> str {
+    let start = model.artifacts.find_substring(raw, prefix)
+    if start < 0 {
+        return ""
+    }
+    let value_start = start + str.len(prefix)
+    let mut value_end = value_start
+    while value_end < str.len(raw) {
+        if str.slice(raw, value_end, value_end + 1) == "\n" {
+            break
+        }
+        value_end = value_end + 1
+    }
+    return str.slice(raw, value_start, value_end)
+}
+fn tagged_frame_payload(raw: str, prefix: str) -> str {
+    let start = model.artifacts.find_substring(raw, prefix)
+    if start < 0 {
+        return ""
+    }
+    return frame_read_next(raw, start + str.len(prefix)).value
+}
+fn bench_child_command() -> str {
+    let configured = env.get("FPA_SELF_CMD")
+    if configured != "" {
+        return configured
+    }
+    let current = process.command_name()
+    if current != "" && io.is_file(current) == 1 {
+        return current
+    }
+    return "./src/.fz/build/main"
+}
+fn timed_policy_run_direct(loaded: model.model_loader.LoadedModel, model_dir: str, page_tokens: i32, hot_budget_pct: i32, max_new_tokens: i32, policy_name: str, prompt: model.tokenizer_bridge.TokenizedText) -> str {
+    return runtime.decode_loop.run_timed_wire_direct(loaded, model_dir, page_tokens, hot_budget_pct, max_new_tokens, policy_name, prompt)
+}
+fn budget_prefix(budget_label: str) -> str {
+    return str.concat("artifacts/bench_budget_", budget_safe_label(budget_label))
+}
+fn budget_bundle_from_written_files(budget_label: str) -> str {
+    let prefix = budget_prefix(budget_label)
+    return bundle_join(fs.read_file(str.concat(prefix, "_report_wire.txt")), fs.read_file(str.concat(prefix, "_report_json.txt")), fs.read_file(str.concat(prefix, "_samples_wire.txt")), fs.read_file(str.concat(prefix, "_failures_wire.txt")))
+}
+fn run_budget_bundle_from_child(model_dir: str, page_tokens: i32, budget_label: str, hot_budget_pct: i32) -> str {
+    let argv = proc.argv_new()
+    let env_map = proc.env_new()
+    discard proc.env_set(env_map, "FPA_MODE", "bench_budget")
+    discard proc.env_set(env_map, "FPA_MODEL_DIR", model_dir)
+    discard proc.env_set(env_map, "FPA_PAGE_TOKENS", str.from_i32(page_tokens))
+    discard proc.env_set(env_map, "FPA_HOT_BUDGET_PCT", str.from_i32(hot_budget_pct))
+    discard proc.env_set(env_map, "FPA_BENCH_BUDGET_LABEL", budget_label)
+    if env.get("FPA_BENCH_PROFILE") != "" {
+        discard proc.env_set(env_map, "FPA_BENCH_PROFILE", env.get("FPA_BENCH_PROFILE"))
+    }
+    if env.get("FPA_BENCH_LIMIT") != "" {
+        discard proc.env_set(env_map, "FPA_BENCH_LIMIT", env.get("FPA_BENCH_LIMIT"))
+    }
+    if env.get("FPA_BENCH_OFFSET") != "" {
+        discard proc.env_set(env_map, "FPA_BENCH_OFFSET", env.get("FPA_BENCH_OFFSET"))
+    }
+    if env.get("FPA_BENCH_TIMEOUT_MS") != "" {
+        discard proc.env_set(env_map, "FPA_BENCH_TIMEOUT_MS", env.get("FPA_BENCH_TIMEOUT_MS"))
+    }
+    discard proc.env_set(env_map, "FPA_TRACE_RUNTIME", "1")
+    let handle = proc.spawn_cmd(bench_child_command(), argv, env_map, "")
+    defer process.close(handle)
+    let timeout_ms = bench_budget_timeout_ms(model_dir)
+    let wait_started_ms = time.monotonic_ms()
+    let mut ready = proc.poll(handle)
+    while ready == 0 && (time.monotonic_ms() - wait_started_ms) < timeout_ms {
+        discard time.sleep_ms(10)
+        ready = proc.poll(handle)
+    }
+    if ready == 0 {
+        discard proc.wait(handle, 1)
+    } else {
+        discard proc.wait(handle, timeout_ms)
+    }
+    let stdout = proc.stdout(handle)
+    let stderr = proc.stderr(handle)
+    let exit_code = proc.exit_code(handle)
+    let payload = bench_budget_bundle_payload(stdout)
+    let bundle = budget_bundle_from_written_files(budget_label)
+    if trace_enabled() == 1 {
+        discard term.write(
+            str.concat(
+                str.concat(
+                    str.concat(
+                        str.concat(
+                            str.concat(
+                                "FPA_TRACE_BENCH_BUDGET_CHILD budget=",
+                                budget_label
+                            ),
+                            str.concat(" exit_code=", str.from_i32(exit_code))
+                        ),
+                        str.concat(" stdout_len=", str.from_i32(str.len(stdout)))
+                    ),
+                    str.concat(
+                        str.concat(" stderr_len=", str.from_i32(str.len(stderr))),
+                        str.concat(" bundle_len=", str.from_i32(str.len(bundle)))
+                    )
+                ),
+                str.concat(str.concat(" payload_len=", str.from_i32(str.len(payload))), "\n")
+            )
+        )
+    }
+    if exit_code != 0 || bundle == "" {
+        discard term.write_err(
+            str.concat(
+                str.concat(
+                    str.concat(
+                        str.concat("FPA_BENCH_BUDGET_CHILD_ERROR budget=", budget_label),
+                        str.concat(
+                            str.concat(" exit_code=", str.from_i32(exit_code)),
+                            str.concat(
+                                str.concat(" payload_len=", str.from_i32(str.len(payload))),
+                                str.concat(" bundle_len=", str.from_i32(str.len(bundle)))
+                            )
+                        )
+                    ),
+                    str.concat(
+                        str.concat(" stdout_len=", str.from_i32(str.len(stdout))),
+                        str.concat(" stdout_head=", json.str(take_chars(stdout, 0, 120)))
+                    )
+                ),
+                str.concat(
+                    str.concat(
+                        str.concat(" stderr_len=", str.from_i32(str.len(stderr))),
+                        str.concat(" stderr_head=", json.str(take_chars(stderr, 0, 120)))
+                    ),
+                    "\n"
+                )
+            )
+        )
+    }
+    return bundle
+}
+fn bundle_join(report_wire: str, report_json: str, sample_rows_wire: str, failure_rows_wire: str) -> str {
+    return frame_push(frame_push(frame_push(frame_push("", report_wire), report_json), sample_rows_wire), failure_rows_wire)
+}
+fn bundle_part_at(bundle: str, position: i32) -> str {
+    return frame_value_at(bundle, position)
+}
+fn aggregate_json(report: PolicyAggregate) -> str {
+    return aggregate_json_from_full(report.policy_name, report.sample_count, report.exact_match_count, report.contains_target_count, report.matching_tokens, report.total_tokens, report.avg_effective_bytes_per_token * report.total_tokens, report.avg_block_remaps_per_sample * report.sample_count, report.avg_old_pages_streamed * report.sample_count, report.avg_raw_pages_streamed * report.sample_count, report.avg_ttft_ms * report.sample_count, report.avg_latency_ms * report.sample_count, report.avg_tokens_per_sec * report.sample_count, report.avg_steady_tokens_per_sec * report.sample_count)
+}
+fn aggregate_json_from(policy_name: str, sample_count: i32, exact_match_count: i32, contains_target_count: i32, matching_tokens: i32, total_tokens: i32, effective_bytes_total: i32, block_remaps_total: i32, old_pages_total: i32, raw_pages_total: i32) -> str {
+    return aggregate_json_from_full(policy_name, sample_count, exact_match_count, contains_target_count, matching_tokens, total_tokens, effective_bytes_total, block_remaps_total, old_pages_total, raw_pages_total, 0, 0, 0, 0)
+}
+fn aggregate_json_from_full(policy_name: str, sample_count: i32, exact_match_count: i32, contains_target_count: i32, matching_tokens: i32, total_tokens: i32, effective_bytes_total: i32, block_remaps_total: i32, old_pages_total: i32, raw_pages_total: i32, ttft_ms_total: i32, latency_ms_total: i32, tokens_per_sec_total: i32, steady_tokens_per_sec_total: i32) -> str {
+    let top1 = if total_tokens <= 0 {
+        0
+    } else {
+        (matching_tokens * 100) / total_tokens
+    }
+    let avg_effective = if total_tokens <= 0 {
+        0
+    } else {
+        effective_bytes_total / total_tokens
+    }
+    let avg_remaps = if sample_count <= 0 {
+        0
+    } else {
+        block_remaps_total / sample_count
+    }
+    let avg_old = if sample_count <= 0 {
+        0
+    } else {
+        old_pages_total / sample_count
+    }
+    let avg_raw = if sample_count <= 0 {
+        0
+    } else {
+        raw_pages_total / sample_count
+    }
+    let avg_ttft_ms = if sample_count <= 0 {
+        0
+    } else {
+        ttft_ms_total / sample_count
+    }
+    let avg_latency_ms = if sample_count <= 0 {
+        0
+    } else {
+        latency_ms_total / sample_count
+    }
+    let avg_tokens_per_sec = if sample_count <= 0 {
+        0
+    } else {
+        tokens_per_sec_total / sample_count
+    }
+    let avg_steady_tokens_per_sec = if sample_count <= 0 {
+        0
+    } else {
+        steady_tokens_per_sec_total / sample_count
+    }
+    return str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat("{\"policy\":", json.str(policy_name)), str.concat(",\"sample_count\":", str.from_i32(sample_count))), str.concat(",\"exact_match_count\":", str.from_i32(exact_match_count))), str.concat(",\"contains_target_count\":", str.from_i32(contains_target_count))), str.concat(",\"matching_tokens\":", str.from_i32(matching_tokens))), str.concat(",\"total_tokens\":", str.from_i32(total_tokens))), str.concat(",\"top1_agreement_pct\":", str.from_i32(top1))), str.concat(",\"avg_effective_bytes_per_token\":", str.from_i32(avg_effective))), str.concat(",\"avg_block_remaps_per_sample\":", str.from_i32(avg_remaps))), str.concat(",\"avg_old_pages_streamed\":", str.from_i32(avg_old))), str.concat(",\"avg_raw_pages_streamed\":", str.from_i32(avg_raw))), str.concat(",\"avg_ttft_ms\":", str.from_i32(avg_ttft_ms))), str.concat(",\"avg_latency_ms\":", str.from_i32(avg_latency_ms))), str.concat(str.concat(str.concat(",\"avg_tokens_per_sec\":", str.from_i32(avg_tokens_per_sec)), str.concat(",\"avg_steady_tokens_per_sec\":", str.from_i32(avg_steady_tokens_per_sec))), "}"))
+}
+fn sample_row_json(row: SampleRow) -> str {
+    let payload = map.new() discard map.set(payload, "budget_label", json.str(row.budget_label)) discard map.set(payload, "hot_budget_pct", model.json_emit.i32(row.hot_budget_pct)) discard map.set(payload, "sample_id", json.str(row.sample_id)) discard map.set(payload, "category", json.str(row.category)) discard map.set(payload, "policy_name", json.str(row.policy_name)) discard map.set(payload, "prompt_text", json.str(row.prompt_text)) discard map.set(payload, "target_hint", json.str(row.target_hint)) discard map.set(payload, "prompt_token_count", model.json_emit.i32(row.prompt_token_count)) discard map.set(payload, "generated_tokens", model.json_emit.i32(row.generated_tokens)) discard map.set(payload, "generated_text", json.str(row.generated_text)) discard map.set(payload, "generated_token_ids_wire", json.str(row.generated_token_ids_wire)) discard map.set(payload, "baseline_generated_text", json.str(row.baseline_generated_text)) discard map.set(payload, "baseline_generated_token_ids_wire", json.str(row.baseline_generated_token_ids_wire)) discard map.set(payload, "exact_match", model.json_emit.i32(row.exact_match)) discard map.set(payload, "contains_target", model.json_emit.i32(row.contains_target)) discard map.set(payload, "matching_tokens", model.json_emit.i32(row.matching_tokens)) discard map.set(payload, "total_tokens", model.json_emit.i32(row.total_tokens)) discard map.set(payload, "top1_agreement_pct", model.json_emit.i32(row.top1_agreement_pct)) discard map.set(payload, "edit_distance", model.json_emit.i32(row.edit_distance)) discard map.set(payload, "effective_bytes_total", model.json_emit.i32(row.effective_bytes_total)) discard map.set(payload, "block_remap_count_total", model.json_emit.i32(row.block_remap_count_total)) discard map.set(payload, "copy_on_write_count_total", model.json_emit.i32(row.copy_on_write_count_total)) discard map.set(payload, "old_pages_streamed_total", model.json_emit.i32(row.old_pages_streamed_total)) discard map.set(payload, "raw_pages_streamed_total", model.json_emit.i32(row.raw_pages_streamed_total)) discard map.set(payload, "parity_match", model.json_emit.i32(row.parity_match)) discard map.set(payload, "ttft_ms", model.json_emit.i32(row.ttft_ms)) discard map.set(payload, "latency_ms", model.json_emit.i32(row.latency_ms)) discard map.set(payload, "tokens_per_sec", model.json_emit.i32(row.tokens_per_sec)) discard map.set(payload, "steady_tokens_per_sec", model.json_emit.i32(row.steady_tokens_per_sec)) return json.object(payload)
+}
+fn sample_row_wire(row: SampleRow) -> str {
+    let mut wire = "" wire = frame_push(wire, row.budget_label) wire = frame_push(wire, str.from_i32(row.hot_budget_pct)) wire = frame_push(wire, row.sample_id) wire = frame_push(wire, row.category) wire = frame_push(wire, row.policy_name) wire = frame_push(wire, row.prompt_text) wire = frame_push(wire, row.target_hint) wire = frame_push(wire, str.from_i32(row.prompt_token_count)) wire = frame_push(wire, str.from_i32(row.generated_tokens)) wire = frame_push(wire, row.generated_text) wire = frame_push(wire, row.generated_token_ids_wire) wire = frame_push(wire, row.baseline_generated_text) wire = frame_push(wire, row.baseline_generated_token_ids_wire) wire = frame_push(wire, str.from_i32(row.exact_match)) wire = frame_push(wire, str.from_i32(row.contains_target)) wire = frame_push(wire, str.from_i32(row.matching_tokens)) wire = frame_push(wire, str.from_i32(row.total_tokens)) wire = frame_push(wire, str.from_i32(row.top1_agreement_pct)) wire = frame_push(wire, str.from_i32(row.edit_distance)) wire = frame_push(wire, str.from_i32(row.effective_bytes_total)) wire = frame_push(wire, str.from_i32(row.block_remap_count_total)) wire = frame_push(wire, str.from_i32(row.copy_on_write_count_total)) wire = frame_push(wire, str.from_i32(row.old_pages_streamed_total)) wire = frame_push(wire, str.from_i32(row.raw_pages_streamed_total)) wire = frame_push(wire, str.from_i32(row.parity_match)) wire = frame_push(wire, str.from_i32(row.ttft_ms)) wire = frame_push(wire, str.from_i32(row.latency_ms)) wire = frame_push(wire, str.from_i32(row.tokens_per_sec)) wire = frame_push(wire, str.from_i32(row.steady_tokens_per_sec)) return wire
+}
+fn sample_row_from_wire(raw: str) -> SampleRow {
+    return SampleRow {
+        budget_label: frame_value_at(raw, 0), hot_budget_pct: parse_decimal(frame_value_at(raw, 1)), sample_id: frame_value_at(raw, 2), category: frame_value_at(raw, 3), policy_name: frame_value_at(raw, 4), prompt_text: frame_value_at(raw, 5), target_hint: frame_value_at(raw, 6), prompt_token_count: parse_decimal(frame_value_at(raw, 7)), generated_tokens: parse_decimal(frame_value_at(raw, 8)), generated_text: frame_value_at(raw, 9), generated_token_ids_wire: frame_value_at(raw, 10), baseline_generated_text: frame_value_at(raw, 11), baseline_generated_token_ids_wire: frame_value_at(raw, 12), exact_match: parse_decimal(frame_value_at(raw, 13)), contains_target: parse_decimal(frame_value_at(raw, 14)), matching_tokens: parse_decimal(frame_value_at(raw, 15)), total_tokens: parse_decimal(frame_value_at(raw, 16)), top1_agreement_pct: parse_decimal(frame_value_at(raw, 17)), edit_distance: parse_decimal(frame_value_at(raw, 18)), effective_bytes_total: parse_decimal(frame_value_at(raw, 19)), block_remap_count_total: parse_decimal(frame_value_at(raw, 20)), copy_on_write_count_total: parse_decimal(frame_value_at(raw, 21)), old_pages_streamed_total: parse_decimal(frame_value_at(raw, 22)), raw_pages_streamed_total: parse_decimal(frame_value_at(raw, 23)), parity_match: parse_decimal(frame_value_at(raw, 24)), ttft_ms: parse_decimal(frame_value_at(raw, 25)), latency_ms: parse_decimal(frame_value_at(raw, 26)), tokens_per_sec: parse_decimal(frame_value_at(raw, 27)), steady_tokens_per_sec: parse_decimal(frame_value_at(raw, 28)),
+    }
+}
+fn benchmark_report_json(report: BenchmarkReport) -> str {
+    return benchmark_report_json_from_fields(report.budget_label, report.hot_budget_pct, report.suite_size, report.full_kv, report.paged_full_kv, report.recent_only, report.quantized_old_kv, report.fidelity_paged_kv)
+}
+fn aggregate_wire(aggregate: PolicyAggregate) -> str {
+    let mut wire = "" wire = frame_push(wire, aggregate.policy_name) wire = frame_push(wire, str.from_i32(aggregate.sample_count)) wire = frame_push(wire, str.from_i32(aggregate.exact_match_count)) wire = frame_push(wire, str.from_i32(aggregate.contains_target_count)) wire = frame_push(wire, str.from_i32(aggregate.matching_tokens)) wire = frame_push(wire, str.from_i32(aggregate.total_tokens)) wire = frame_push(wire, str.from_i32(aggregate.top1_agreement_pct)) wire = frame_push(wire, str.from_i32(aggregate.avg_effective_bytes_per_token)) wire = frame_push(wire, str.from_i32(aggregate.avg_block_remaps_per_sample)) wire = frame_push(wire, str.from_i32(aggregate.avg_old_pages_streamed)) wire = frame_push(wire, str.from_i32(aggregate.avg_raw_pages_streamed)) wire = frame_push(wire, str.from_i32(aggregate.avg_ttft_ms)) wire = frame_push(wire, str.from_i32(aggregate.avg_latency_ms)) wire = frame_push(wire, str.from_i32(aggregate.avg_tokens_per_sec)) wire = frame_push(wire, str.from_i32(aggregate.avg_steady_tokens_per_sec)) return wire
+}
+fn aggregate_wire_from_fields(policy_name: str, sample_count: i32, exact_match_count: i32, contains_target_count: i32, matching_tokens: i32, total_tokens: i32, effective_bytes_total: i32, block_remaps_total: i32, old_pages_total: i32, raw_pages_total: i32) -> str {
+    return aggregate_wire_from_fields_full(policy_name, sample_count, exact_match_count, contains_target_count, matching_tokens, total_tokens, effective_bytes_total, block_remaps_total, old_pages_total, raw_pages_total, 0, 0, 0, 0)
+}
+fn aggregate_wire_from_fields_full(policy_name: str, sample_count: i32, exact_match_count: i32, contains_target_count: i32, matching_tokens: i32, total_tokens: i32, effective_bytes_total: i32, block_remaps_total: i32, old_pages_total: i32, raw_pages_total: i32, ttft_ms_total: i32, latency_ms_total: i32, tokens_per_sec_total: i32, steady_tokens_per_sec_total: i32) -> str {
+    let top1 = if total_tokens <= 0 {
+        0
+    } else {
+        (matching_tokens * 100) / total_tokens
+    }
+    let avg_effective = if total_tokens <= 0 {
+        0
+    } else {
+        effective_bytes_total / total_tokens
+    }
+    let avg_remaps = if sample_count <= 0 {
+        0
+    } else {
+        block_remaps_total / sample_count
+    }
+    let avg_old = if sample_count <= 0 {
+        0
+    } else {
+        old_pages_total / sample_count
+    }
+    let avg_raw = if sample_count <= 0 {
+        0
+    } else {
+        raw_pages_total / sample_count
+    }
+    let avg_ttft_ms = if sample_count <= 0 { 0 } else { ttft_ms_total / sample_count }
+    let avg_latency_ms = if sample_count <= 0 { 0 } else { latency_ms_total / sample_count }
+    let avg_tokens_per_sec = if sample_count <= 0 { 0 } else { tokens_per_sec_total / sample_count }
+    let avg_steady_tokens_per_sec = if sample_count <= 0 { 0 } else { steady_tokens_per_sec_total / sample_count }
+    let mut wire = "" wire = frame_push(wire, policy_name) wire = frame_push(wire, str.from_i32(sample_count)) wire = frame_push(wire, str.from_i32(exact_match_count)) wire = frame_push(wire, str.from_i32(contains_target_count)) wire = frame_push(wire, str.from_i32(matching_tokens)) wire = frame_push(wire, str.from_i32(total_tokens)) wire = frame_push(wire, str.from_i32(top1)) wire = frame_push(wire, str.from_i32(avg_effective)) wire = frame_push(wire, str.from_i32(avg_remaps)) wire = frame_push(wire, str.from_i32(avg_old)) wire = frame_push(wire, str.from_i32(avg_raw)) wire = frame_push(wire, str.from_i32(avg_ttft_ms)) wire = frame_push(wire, str.from_i32(avg_latency_ms)) wire = frame_push(wire, str.from_i32(avg_tokens_per_sec)) wire = frame_push(wire, str.from_i32(avg_steady_tokens_per_sec)) return wire
+}
+fn aggregate_from_wire(raw: str, fallback_policy_name: str) -> PolicyAggregate {
+    let policy_name = frame_value_at(raw, 0)
+    return PolicyAggregate {
+        policy_name: if policy_name == "" {
+            fallback_policy_name
+        } else {
+            policy_name
+        }
+        , sample_count: parse_decimal(frame_value_at(raw, 1)), exact_match_count: parse_decimal(frame_value_at(raw, 2)), contains_target_count: parse_decimal(frame_value_at(raw, 3)), matching_tokens: parse_decimal(frame_value_at(raw, 4)), total_tokens: parse_decimal(frame_value_at(raw, 5)), top1_agreement_pct: parse_decimal(frame_value_at(raw, 6)), avg_effective_bytes_per_token: parse_decimal(frame_value_at(raw, 7)), avg_block_remaps_per_sample: parse_decimal(frame_value_at(raw, 8)), avg_old_pages_streamed: parse_decimal(frame_value_at(raw, 9)), avg_raw_pages_streamed: parse_decimal(frame_value_at(raw, 10)), avg_ttft_ms: parse_decimal(frame_value_at(raw, 11)), avg_latency_ms: parse_decimal(frame_value_at(raw, 12)), avg_tokens_per_sec: parse_decimal(frame_value_at(raw, 13)), avg_steady_tokens_per_sec: parse_decimal(frame_value_at(raw, 14)),
+    }
+}
+fn benchmark_report_wire(report: BenchmarkReport) -> str {
+    return benchmark_report_wire_from_fields(report.budget_label, report.hot_budget_pct, report.suite_size, report.full_kv, report.paged_full_kv, report.recent_only, report.quantized_old_kv, report.fidelity_paged_kv)
+}
+fn benchmark_report_wire_from_fields(budget_label: str, hot_budget_pct: i32, suite_size: i32, full_kv: PolicyAggregate, paged_full_kv: PolicyAggregate, recent_only: PolicyAggregate, quantized_old_kv: PolicyAggregate, fidelity_paged_kv: PolicyAggregate) -> str {
+    let mut wire = "" wire = frame_push(wire, budget_label) wire = frame_push(wire, str.from_i32(hot_budget_pct)) wire = frame_push(wire, str.from_i32(suite_size)) wire = frame_push(wire, aggregate_wire(full_kv)) wire = frame_push(wire, aggregate_wire(paged_full_kv)) wire = frame_push(wire, aggregate_wire(recent_only)) wire = frame_push(wire, aggregate_wire(quantized_old_kv)) wire = frame_push(wire, aggregate_wire(fidelity_paged_kv)) return wire
+}
+fn benchmark_report_wire_from_totals(budget_label: str, hot_budget_pct: i32, suite_size: i32, full_sample_count: i32, full_exact_match_count: i32, full_contains_target_count: i32, full_matching_tokens: i32, full_total_tokens: i32, full_effective_bytes_total: i32, full_block_remaps_total: i32, full_old_pages_total: i32, full_raw_pages_total: i32, full_ttft_ms_total: i32, full_latency_ms_total: i32, full_tokens_per_sec_total: i32, full_steady_tokens_per_sec_total: i32, paged_sample_count: i32, paged_exact_match_count: i32, paged_contains_target_count: i32, paged_matching_tokens: i32, paged_total_tokens: i32, paged_effective_bytes_total: i32, paged_block_remaps_total: i32, paged_old_pages_total: i32, paged_raw_pages_total: i32, paged_ttft_ms_total: i32, paged_latency_ms_total: i32, paged_tokens_per_sec_total: i32, paged_steady_tokens_per_sec_total: i32, recent_sample_count: i32, recent_exact_match_count: i32, recent_contains_target_count: i32, recent_matching_tokens: i32, recent_total_tokens: i32, recent_effective_bytes_total: i32, recent_block_remaps_total: i32, recent_old_pages_total: i32, recent_raw_pages_total: i32, recent_ttft_ms_total: i32, recent_latency_ms_total: i32, recent_tokens_per_sec_total: i32, recent_steady_tokens_per_sec_total: i32, quant_sample_count: i32, quant_exact_match_count: i32, quant_contains_target_count: i32, quant_matching_tokens: i32, quant_total_tokens: i32, quant_effective_bytes_total: i32, quant_block_remaps_total: i32, quant_old_pages_total: i32, quant_raw_pages_total: i32, quant_ttft_ms_total: i32, quant_latency_ms_total: i32, quant_tokens_per_sec_total: i32, quant_steady_tokens_per_sec_total: i32, fidelity_sample_count: i32, fidelity_exact_match_count: i32, fidelity_contains_target_count: i32, fidelity_matching_tokens: i32, fidelity_total_tokens: i32, fidelity_effective_bytes_total: i32, fidelity_block_remaps_total: i32, fidelity_old_pages_total: i32, fidelity_raw_pages_total: i32, fidelity_ttft_ms_total: i32, fidelity_latency_ms_total: i32, fidelity_tokens_per_sec_total: i32, fidelity_steady_tokens_per_sec_total: i32) -> str {
+    let mut wire = "" wire = frame_push(wire, budget_label) wire = frame_push(wire, str.from_i32(hot_budget_pct)) wire = frame_push(wire, str.from_i32(suite_size)) wire = frame_push(wire, aggregate_wire_from_fields_full("full_kv", full_sample_count, full_exact_match_count, full_contains_target_count, full_matching_tokens, full_total_tokens, full_effective_bytes_total, full_block_remaps_total, full_old_pages_total, full_raw_pages_total, full_ttft_ms_total, full_latency_ms_total, full_tokens_per_sec_total, full_steady_tokens_per_sec_total)) wire = frame_push(wire, aggregate_wire_from_fields_full("paged_full_kv", paged_sample_count, paged_exact_match_count, paged_contains_target_count, paged_matching_tokens, paged_total_tokens, paged_effective_bytes_total, paged_block_remaps_total, paged_old_pages_total, paged_raw_pages_total, paged_ttft_ms_total, paged_latency_ms_total, paged_tokens_per_sec_total, paged_steady_tokens_per_sec_total)) wire = frame_push(wire, aggregate_wire_from_fields_full("recent_only", recent_sample_count, recent_exact_match_count, recent_contains_target_count, recent_matching_tokens, recent_total_tokens, recent_effective_bytes_total, recent_block_remaps_total, recent_old_pages_total, recent_raw_pages_total, recent_ttft_ms_total, recent_latency_ms_total, recent_tokens_per_sec_total, recent_steady_tokens_per_sec_total)) wire = frame_push(wire, aggregate_wire_from_fields_full("quantized_old_kv", quant_sample_count, quant_exact_match_count, quant_contains_target_count, quant_matching_tokens, quant_total_tokens, quant_effective_bytes_total, quant_block_remaps_total, quant_old_pages_total, quant_raw_pages_total, quant_ttft_ms_total, quant_latency_ms_total, quant_tokens_per_sec_total, quant_steady_tokens_per_sec_total)) wire = frame_push(wire, aggregate_wire_from_fields_full("fidelity_paged_kv", fidelity_sample_count, fidelity_exact_match_count, fidelity_contains_target_count, fidelity_matching_tokens, fidelity_total_tokens, fidelity_effective_bytes_total, fidelity_block_remaps_total, fidelity_old_pages_total, fidelity_raw_pages_total, fidelity_ttft_ms_total, fidelity_latency_ms_total, fidelity_tokens_per_sec_total, fidelity_steady_tokens_per_sec_total)) return wire
+}
+fn benchmark_report_json_from_fields(budget_label: str, hot_budget_pct: i32, suite_size: i32, full_kv: PolicyAggregate, paged_full_kv: PolicyAggregate, recent_only: PolicyAggregate, quantized_old_kv: PolicyAggregate, fidelity_paged_kv: PolicyAggregate) -> str {
+    let payload = map.new() discard map.set(payload, "budget_label", json.str(budget_label)) discard map.set(payload, "hot_budget_pct", model.json_emit.i32(hot_budget_pct)) discard map.set(payload, "suite_size", model.json_emit.i32(suite_size)) discard map.set(payload, "full_kv", model.json_emit.raw(aggregate_json(full_kv))) discard map.set(payload, "paged_full_kv", model.json_emit.raw(aggregate_json(paged_full_kv))) discard map.set(payload, "recent_only", model.json_emit.raw(aggregate_json(recent_only))) discard map.set(payload, "quantized_old_kv", model.json_emit.raw(aggregate_json(quantized_old_kv))) discard map.set(payload, "fidelity_paged_kv", model.json_emit.raw(aggregate_json(fidelity_paged_kv))) return json.object(payload)
+}
+fn benchmark_report_json_from_totals(budget_label: str, hot_budget_pct: i32, suite_size: i32, full_sample_count: i32, full_exact_match_count: i32, full_contains_target_count: i32, full_matching_tokens: i32, full_total_tokens: i32, full_effective_bytes_total: i32, full_block_remaps_total: i32, full_old_pages_total: i32, full_raw_pages_total: i32, full_ttft_ms_total: i32, full_latency_ms_total: i32, full_tokens_per_sec_total: i32, full_steady_tokens_per_sec_total: i32, paged_sample_count: i32, paged_exact_match_count: i32, paged_contains_target_count: i32, paged_matching_tokens: i32, paged_total_tokens: i32, paged_effective_bytes_total: i32, paged_block_remaps_total: i32, paged_old_pages_total: i32, paged_raw_pages_total: i32, paged_ttft_ms_total: i32, paged_latency_ms_total: i32, paged_tokens_per_sec_total: i32, paged_steady_tokens_per_sec_total: i32, recent_sample_count: i32, recent_exact_match_count: i32, recent_contains_target_count: i32, recent_matching_tokens: i32, recent_total_tokens: i32, recent_effective_bytes_total: i32, recent_block_remaps_total: i32, recent_old_pages_total: i32, recent_raw_pages_total: i32, recent_ttft_ms_total: i32, recent_latency_ms_total: i32, recent_tokens_per_sec_total: i32, recent_steady_tokens_per_sec_total: i32, quant_sample_count: i32, quant_exact_match_count: i32, quant_contains_target_count: i32, quant_matching_tokens: i32, quant_total_tokens: i32, quant_effective_bytes_total: i32, quant_block_remaps_total: i32, quant_old_pages_total: i32, quant_raw_pages_total: i32, quant_ttft_ms_total: i32, quant_latency_ms_total: i32, quant_tokens_per_sec_total: i32, quant_steady_tokens_per_sec_total: i32, fidelity_sample_count: i32, fidelity_exact_match_count: i32, fidelity_contains_target_count: i32, fidelity_matching_tokens: i32, fidelity_total_tokens: i32, fidelity_effective_bytes_total: i32, fidelity_block_remaps_total: i32, fidelity_old_pages_total: i32, fidelity_raw_pages_total: i32, fidelity_ttft_ms_total: i32, fidelity_latency_ms_total: i32, fidelity_tokens_per_sec_total: i32, fidelity_steady_tokens_per_sec_total: i32) -> str {
+    let payload = map.new() discard map.set(payload, "budget_label", json.str(budget_label)) discard map.set(payload, "hot_budget_pct", model.json_emit.i32(hot_budget_pct)) discard map.set(payload, "suite_size", model.json_emit.i32(suite_size)) discard map.set(payload, "full_kv", model.json_emit.raw(aggregate_json_from_full("full_kv", full_sample_count, full_exact_match_count, full_contains_target_count, full_matching_tokens, full_total_tokens, full_effective_bytes_total, full_block_remaps_total, full_old_pages_total, full_raw_pages_total, full_ttft_ms_total, full_latency_ms_total, full_tokens_per_sec_total, full_steady_tokens_per_sec_total))) discard map.set(payload, "paged_full_kv", model.json_emit.raw(aggregate_json_from_full("paged_full_kv", paged_sample_count, paged_exact_match_count, paged_contains_target_count, paged_matching_tokens, paged_total_tokens, paged_effective_bytes_total, paged_block_remaps_total, paged_old_pages_total, paged_raw_pages_total, paged_ttft_ms_total, paged_latency_ms_total, paged_tokens_per_sec_total, paged_steady_tokens_per_sec_total))) discard map.set(payload, "recent_only", model.json_emit.raw(aggregate_json_from_full("recent_only", recent_sample_count, recent_exact_match_count, recent_contains_target_count, recent_matching_tokens, recent_total_tokens, recent_effective_bytes_total, recent_block_remaps_total, recent_old_pages_total, recent_raw_pages_total, recent_ttft_ms_total, recent_latency_ms_total, recent_tokens_per_sec_total, recent_steady_tokens_per_sec_total))) discard map.set(payload, "quantized_old_kv", model.json_emit.raw(aggregate_json_from_full("quantized_old_kv", quant_sample_count, quant_exact_match_count, quant_contains_target_count, quant_matching_tokens, quant_total_tokens, quant_effective_bytes_total, quant_block_remaps_total, quant_old_pages_total, quant_raw_pages_total, quant_ttft_ms_total, quant_latency_ms_total, quant_tokens_per_sec_total, quant_steady_tokens_per_sec_total))) discard map.set(payload, "fidelity_paged_kv", model.json_emit.raw(aggregate_json_from_full("fidelity_paged_kv", fidelity_sample_count, fidelity_exact_match_count, fidelity_contains_target_count, fidelity_matching_tokens, fidelity_total_tokens, fidelity_effective_bytes_total, fidelity_block_remaps_total, fidelity_old_pages_total, fidelity_raw_pages_total, fidelity_ttft_ms_total, fidelity_latency_ms_total, fidelity_tokens_per_sec_total, fidelity_steady_tokens_per_sec_total))) return json.object(payload)
+}
+fn benchmark_report_from_wire(raw: str) -> BenchmarkReport {
+    return BenchmarkReport {
+        budget_label: frame_value_at(raw, 0), hot_budget_pct: parse_decimal(frame_value_at(raw, 1)), suite_size: parse_decimal(frame_value_at(raw, 2)), full_kv: aggregate_from_wire(frame_value_at(raw, 3), "full_kv"), paged_full_kv: aggregate_from_wire(frame_value_at(raw, 4), "paged_full_kv"), recent_only: aggregate_from_wire(frame_value_at(raw, 5), "recent_only"), quantized_old_kv: aggregate_from_wire(frame_value_at(raw, 6), "quantized_old_kv"), fidelity_paged_kv: aggregate_from_wire(frame_value_at(raw, 7), "fidelity_paged_kv"),
+    }
+}
+fn zero_aggregate(policy_name: str) -> PolicyAggregate {
+    return PolicyAggregate {
+        policy_name: policy_name, sample_count: 0, exact_match_count: 0, contains_target_count: 0, matching_tokens: 0, total_tokens: 0, top1_agreement_pct: 0, avg_effective_bytes_per_token: 0, avg_block_remaps_per_sample: 0, avg_old_pages_streamed: 0, avg_raw_pages_streamed: 0, avg_ttft_ms: 0, avg_latency_ms: 0, avg_tokens_per_sec: 0, avg_steady_tokens_per_sec: 0,
+    }
+}
+fn aggregate_from_totals(policy_name: str, sample_count: i32, exact_match_count: i32, contains_target_count: i32, matching_tokens: i32, total_tokens: i32, effective_bytes_total: i32, block_remaps_total: i32, old_pages_total: i32, raw_pages_total: i32, ttft_ms_total: i32, latency_ms_total: i32, tokens_per_sec_total: i32, steady_tokens_per_sec_total: i32) -> PolicyAggregate {
+    return PolicyAggregate {
+        policy_name: policy_name, sample_count: sample_count, exact_match_count: exact_match_count, contains_target_count: contains_target_count, matching_tokens: matching_tokens, total_tokens: total_tokens, top1_agreement_pct: if total_tokens <= 0 {
+            0
+        } else {
+            (matching_tokens * 100) / total_tokens
+        }
+        , avg_effective_bytes_per_token: if total_tokens <= 0 {
+            0
+        } else {
+            effective_bytes_total / total_tokens
+        }
+        , avg_block_remaps_per_sample: if sample_count <= 0 {
+            0
+        } else {
+            block_remaps_total / sample_count
+        }
+        , avg_old_pages_streamed: if sample_count <= 0 {
+            0
+        } else {
+            old_pages_total / sample_count
+        }
+        , avg_raw_pages_streamed: if sample_count <= 0 {
+            0
+        } else {
+            raw_pages_total / sample_count
+        }
+        , avg_ttft_ms: if sample_count <= 0 { 0 } else { ttft_ms_total / sample_count }
+        , avg_latency_ms: if sample_count <= 0 { 0 } else { latency_ms_total / sample_count }
+        , avg_tokens_per_sec: if sample_count <= 0 { 0 } else { tokens_per_sec_total / sample_count }
+        , avg_steady_tokens_per_sec: if sample_count <= 0 { 0 } else { steady_tokens_per_sec_total / sample_count }
+        ,
+    }
+}
+fn aggregate_rows_for_policy(sample_rows_wire: str, policy_name: str) -> PolicyAggregate {
+    let total_rows = collection_count(sample_rows_wire)
+    let mut sample_count = 0
+    let mut exact_match_count = 0
+    let mut contains_target_count = 0
+    let mut matching_tokens = 0
+    let mut total_tokens = 0
+    let mut effective_bytes_total = 0
+    let mut block_remaps_total = 0
+    let mut old_pages_total = 0
+    let mut raw_pages_total = 0
+    let mut ttft_ms_total = 0
+    let mut latency_ms_total = 0
+    let mut tokens_per_sec_total = 0
+    let mut steady_tokens_per_sec_total = 0
+    let mut idx = 0
+    while idx < total_rows {
+        let row_wire = collection_item_at(sample_rows_wire, idx)
+        if frame_value_at(row_wire, 4) == policy_name {
+            sample_count = sample_count + 1
+            exact_match_count = exact_match_count + parse_decimal(frame_value_at(row_wire, 13))
+            contains_target_count = contains_target_count + parse_decimal(frame_value_at(row_wire, 14))
+            matching_tokens = matching_tokens + parse_decimal(frame_value_at(row_wire, 15))
+            total_tokens = total_tokens + parse_decimal(frame_value_at(row_wire, 16))
+            effective_bytes_total = effective_bytes_total + parse_decimal(frame_value_at(row_wire, 19))
+            block_remaps_total = block_remaps_total + parse_decimal(frame_value_at(row_wire, 20))
+            old_pages_total = old_pages_total + parse_decimal(frame_value_at(row_wire, 22))
+            raw_pages_total = raw_pages_total + parse_decimal(frame_value_at(row_wire, 23))
+            ttft_ms_total = ttft_ms_total + parse_decimal(frame_value_at(row_wire, 25))
+            latency_ms_total = latency_ms_total + parse_decimal(frame_value_at(row_wire, 26))
+            tokens_per_sec_total = tokens_per_sec_total + parse_decimal(frame_value_at(row_wire, 27))
+            steady_tokens_per_sec_total = steady_tokens_per_sec_total + parse_decimal(frame_value_at(row_wire, 28))
+        }
+        idx = idx + 1
+    }
+    return aggregate_from_totals(policy_name, sample_count, exact_match_count, contains_target_count, matching_tokens, total_tokens, effective_bytes_total, block_remaps_total, old_pages_total, raw_pages_total, ttft_ms_total, latency_ms_total, tokens_per_sec_total, steady_tokens_per_sec_total)
+}
+fn benchmark_report_from_rows(budget_label: str, hot_budget_pct: i32, suite_size: i32, sample_rows_wire: str) -> BenchmarkReport {
+    return BenchmarkReport {
+        budget_label: budget_label, hot_budget_pct: hot_budget_pct, suite_size: suite_size, full_kv: aggregate_rows_for_policy(sample_rows_wire, "full_kv"), paged_full_kv: aggregate_rows_for_policy(sample_rows_wire, "paged_full_kv"), recent_only: aggregate_rows_for_policy(sample_rows_wire, "recent_only"), quantized_old_kv: aggregate_rows_for_policy(sample_rows_wire, "quantized_old_kv"), fidelity_paged_kv: aggregate_rows_for_policy(sample_rows_wire, "fidelity_paged_kv"),
+    }
+}
+fn append_wire(wire: str, entry: str) -> str {
+    if entry == "" {
+        return wire
+    }
+    return frame_push(wire, entry)
+}
+fn collection_count(wire: str) -> i32 {
+    if wire == "" {
+        return 0
+    }
+    let mut total = 0
+    let mut idx = 0
+    while idx < str.len(wire) {
+        let entry = frame_skip_next(wire, idx)
+        total = total + 1
+        idx = entry
+    }
+    return total
+}
+fn collection_item_at(wire: str, position: i32) -> str {
+    return frame_value_at(wire, position)
+}
+fn append_rows_wire(wire: str, rows_wire: str) -> str {
+    let row_count = collection_count(rows_wire) let mut out = wire
+    let mut idx = 0
+    while idx < row_count {
+        out = append_wire(out, collection_item_at(rows_wire, idx))
+        idx = idx + 1
+    }
+    return out
+}
+fn sample_row_wire_from_result_wires(budget_label: str, hot_budget_pct: i32, sample_wire: str, policy_name: str, result_wire: str, baseline_wire: str, comparison_wire: str) -> str {
+    let mut wire = "" wire = frame_push(wire, budget_label) wire = frame_push(wire, str.from_i32(hot_budget_pct)) wire = frame_push(wire, bench.stress_suite.sample_id_from_wire(sample_wire)) wire = frame_push(wire, bench.stress_suite.category_from_wire(sample_wire)) wire = frame_push(wire, policy_name) wire = frame_push(wire, bench.stress_suite.prompt_from_wire(sample_wire)) wire = frame_push(wire, bench.stress_suite.target_hint_from_wire(sample_wire)) wire = frame_push(wire, str.from_i32(runtime.decode_loop.prompt_token_count(result_wire))) wire = frame_push(wire, str.from_i32(runtime.decode_loop.generated_tokens(result_wire))) wire = frame_push(wire, runtime.decode_loop.generated_text(result_wire)) wire = frame_push(wire, runtime.decode_loop.generated_token_ids_wire(result_wire)) wire = frame_push(wire, runtime.decode_loop.generated_text(baseline_wire)) wire = frame_push(wire, runtime.decode_loop.generated_token_ids_wire(baseline_wire)) wire = frame_push(wire, str.from_i32(bench.metrics.exact_match(comparison_wire))) wire = frame_push(wire, str.from_i32(bench.metrics.contains_target(comparison_wire))) wire = frame_push(wire, str.from_i32(bench.metrics.matching_tokens(comparison_wire))) wire = frame_push(wire, str.from_i32(bench.metrics.total_tokens(comparison_wire))) wire = frame_push(wire, str.from_i32(bench.metrics.top1_agreement_pct(comparison_wire))) wire = frame_push(wire, str.from_i32(bench.metrics.edit_distance(comparison_wire))) wire = frame_push(wire, str.from_i32(runtime.decode_loop.effective_bytes_total(result_wire))) wire = frame_push(wire, str.from_i32(runtime.decode_loop.block_remap_count_total(result_wire))) wire = frame_push(wire, str.from_i32(runtime.decode_loop.copy_on_write_count_total(result_wire))) wire = frame_push(wire, str.from_i32(runtime.decode_loop.old_pages_streamed_total(result_wire))) wire = frame_push(wire, str.from_i32(runtime.decode_loop.raw_pages_streamed_total(result_wire))) wire = frame_push(wire, str.from_i32(runtime.decode_loop.parity_match(result_wire))) wire = frame_push(wire, "0") wire = frame_push(wire, "0") wire = frame_push(wire, "0") wire = frame_push(wire, "0") return wire
+}
+fn should_record_failure(row: SampleRow) -> i32 {
+    if row.policy_name == "full_kv" {
+        if row.parity_match == 0 {
+            return 1
+        }
+        return 0
+    }
+    if row.exact_match == 0 {
+        return 1
+    }
+    if row.contains_target == 0 {
+        return 1
+    }
+    if row.parity_match == 0 {
+        return 1
+    }
+    return 0
+}
+fn should_record_failure_from_fields(policy_name: str, exact_match: i32, contains_target: i32, parity_match: i32) -> i32 {
+    if policy_name == "full_kv" {
+        if parity_match == 0 {
+            return 1
+        }
+        return 0
+    }
+    if exact_match == 0 {
+        return 1
+    }
+    if contains_target == 0 {
+        return 1
+    }
+    if parity_match == 0 {
+        return 1
+    }
+    return 0
+}
+fn append_failure_wire(failure_rows_wire: str, row_wire: str, pick_failure: i32) -> str {
+    if pick_failure == 1 {
+        return append_wire(failure_rows_wire, row_wire)
+    }
+    return failure_rows_wire
+}
+fn sample_row_wire_from_timed_result(budget_label: str, hot_budget_pct: i32, sample_wire: str, policy_name: str, timed_wire: str, baseline_wire: str, comparison_wire: str) -> str {
+    let result_wire = runtime.decode_loop.timed_decode_result_wire(timed_wire)
+    let sample_id = bench.stress_suite.sample_id_from_wire(sample_wire)
+    let category = bench.stress_suite.category_from_wire(sample_wire)
+    let prompt_text = bench.stress_suite.prompt_from_wire(sample_wire)
+    let target_hint = bench.stress_suite.target_hint_from_wire(sample_wire)
+    let prompt_token_count = runtime.decode_loop.prompt_token_count(result_wire)
+    let generated_tokens = runtime.decode_loop.generated_tokens(result_wire)
+    let generated_text = runtime.decode_loop.generated_text(result_wire)
+    let generated_token_ids_wire = runtime.decode_loop.generated_token_ids_wire(result_wire)
+    let baseline_generated_text = runtime.decode_loop.generated_text(baseline_wire)
+    let baseline_generated_token_ids_wire = runtime.decode_loop.generated_token_ids_wire(baseline_wire)
+    let exact_match = bench.metrics.exact_match(comparison_wire)
+    let contains_target = bench.metrics.contains_target(comparison_wire)
+    let matching_tokens = bench.metrics.matching_tokens(comparison_wire)
+    let total_tokens = bench.metrics.total_tokens(comparison_wire)
+    let top1_agreement_pct = bench.metrics.top1_agreement_pct(comparison_wire)
+    let edit_distance = bench.metrics.edit_distance(comparison_wire)
+    let effective_bytes_total = runtime.decode_loop.effective_bytes_total(result_wire)
+    let block_remap_count_total = runtime.decode_loop.block_remap_count_total(result_wire)
+    let copy_on_write_count_total = runtime.decode_loop.copy_on_write_count_total(result_wire)
+    let old_pages_streamed_total = runtime.decode_loop.old_pages_streamed_total(result_wire)
+    let raw_pages_streamed_total = runtime.decode_loop.raw_pages_streamed_total(result_wire)
+    let parity_match = runtime.decode_loop.parity_match(result_wire)
+    let ttft_ms = runtime.decode_loop.timed_decode_ttft_ms(timed_wire)
+    let latency_ms = runtime.decode_loop.timed_decode_latency_ms(timed_wire)
+    let tokens_per_sec = runtime.decode_loop.timed_decode_tokens_per_sec(timed_wire)
+    let steady_tokens_per_sec = runtime.decode_loop.timed_decode_steady_tokens_per_sec(timed_wire)
+    let mut wire = ""
+    wire = frame_push(wire, budget_label)
+    wire = frame_push(wire, str.from_i32(hot_budget_pct))
+    wire = frame_push(wire, sample_id)
+    wire = frame_push(wire, category)
+    wire = frame_push(wire, policy_name)
+    wire = frame_push(wire, prompt_text)
+    wire = frame_push(wire, target_hint)
+    wire = frame_push(wire, str.from_i32(prompt_token_count))
+    wire = frame_push(wire, str.from_i32(generated_tokens))
+    wire = frame_push(wire, generated_text)
+    wire = frame_push(wire, generated_token_ids_wire)
+    wire = frame_push(wire, baseline_generated_text)
+    wire = frame_push(wire, baseline_generated_token_ids_wire)
+    wire = frame_push(wire, str.from_i32(exact_match))
+    wire = frame_push(wire, str.from_i32(contains_target))
+    wire = frame_push(wire, str.from_i32(matching_tokens))
+    wire = frame_push(wire, str.from_i32(total_tokens))
+    wire = frame_push(wire, str.from_i32(top1_agreement_pct))
+    wire = frame_push(wire, str.from_i32(edit_distance))
+    wire = frame_push(wire, str.from_i32(effective_bytes_total))
+    wire = frame_push(wire, str.from_i32(block_remap_count_total))
+    wire = frame_push(wire, str.from_i32(copy_on_write_count_total))
+    wire = frame_push(wire, str.from_i32(old_pages_streamed_total))
+    wire = frame_push(wire, str.from_i32(raw_pages_streamed_total))
+    wire = frame_push(wire, str.from_i32(parity_match))
+    wire = frame_push(wire, str.from_i32(ttft_ms))
+    wire = frame_push(wire, str.from_i32(latency_ms))
+    wire = frame_push(wire, str.from_i32(tokens_per_sec))
+    wire = frame_push(wire, str.from_i32(steady_tokens_per_sec))
+    return wire
+}
+fn run_budget_detailed(shape: model.EngineShape, model_dir: str, page_tokens: i32, budget_label: str, hot_budget_pct: i32) -> BenchmarkArtifacts {
+    discard fs.mkdir("artifacts")
+    let loaded = model.model_loader.load(model_dir, page_tokens)
+    let suite_wire = bench.stress_suite.selected_suite_wire(model_dir)
+    let suite_total = bench.stress_suite.count(suite_wire)
+    let suite_offset = bench_offset(suite_total)
+    let suite_size = bench_limit(suite_total - suite_offset)
+    let mut sample_rows_wire = ""
+    let mut failure_rows_wire = ""
+    let mut idx = 0
+    while idx < suite_size {
+        let sample_wire = bench.stress_suite.item_at(suite_wire, suite_offset + idx)
+        let prompt_text = bench.stress_suite.prompt_from_wire(sample_wire)
+        let target_hint = bench.stress_suite.target_hint_from_wire(sample_wire)
+        let max_new_tokens = bench.stress_suite.max_new_tokens_from_wire(sample_wire)
+        let mut sample_batch_wire = ""
+        let mut failure_batch_wire = ""
+        let prompt = model.tokenizer_bridge.encode(prompt_text, loaded.vocab_size)
+        if trace_enabled() == 1 {
+            discard term.write(str.concat(str.concat(str.concat(str.concat("FPA_TRACE_BENCH_SAMPLE sample_id=", bench.stress_suite.sample_id_from_wire(sample_wire)), str.concat(" max_new_tokens=", str.from_i32(max_new_tokens))), str.concat(" prompt_chars=", str.from_i32(str.len(prompt_text)))), "\n"))
+        }
+        if trace_enabled() == 1 {
+            discard term.write(str.concat(str.concat("FPA_TRACE_BENCH_POLICY_BEGIN sample_id=", bench.stress_suite.sample_id_from_wire(sample_wire)), " full_kv\n"))
+        }
+        let full_timed_wire = timed_policy_run_direct(loaded, model_dir, page_tokens, hot_budget_pct, max_new_tokens, "full_kv", prompt)
+        if trace_enabled() == 1 {
+            discard term.write(str.concat(str.concat("FPA_TRACE_BENCH_POLICY_BEGIN sample_id=", bench.stress_suite.sample_id_from_wire(sample_wire)), " paged_full_kv\n"))
+        }
+        let paged_timed_wire = timed_policy_run_direct(loaded, model_dir, page_tokens, hot_budget_pct, max_new_tokens, "paged_full_kv", prompt)
+        if trace_enabled() == 1 {
+            discard term.write(str.concat(str.concat("FPA_TRACE_BENCH_POLICY_BEGIN sample_id=", bench.stress_suite.sample_id_from_wire(sample_wire)), " recent_only\n"))
+        }
+        let recent_timed_wire = timed_policy_run_direct(loaded, model_dir, page_tokens, hot_budget_pct, max_new_tokens, "recent_only", prompt)
+        if trace_enabled() == 1 {
+            discard term.write(str.concat(str.concat("FPA_TRACE_BENCH_POLICY_BEGIN sample_id=", bench.stress_suite.sample_id_from_wire(sample_wire)), " quantized_old_kv\n"))
+        }
+        let quant_timed_wire = timed_policy_run_direct(loaded, model_dir, page_tokens, hot_budget_pct, max_new_tokens, "quantized_old_kv", prompt)
+        if trace_enabled() == 1 {
+            discard term.write(str.concat(str.concat("FPA_TRACE_BENCH_POLICY_BEGIN sample_id=", bench.stress_suite.sample_id_from_wire(sample_wire)), " fidelity_paged_kv\n"))
+        }
+        let fidelity_timed_wire = timed_policy_run_direct(loaded, model_dir, page_tokens, hot_budget_pct, max_new_tokens, "fidelity_paged_kv", prompt)
+        if trace_enabled() == 1 {
+            discard term.write(str.concat(str.concat("FPA_TRACE_BENCH_POLICY_DONE sample_id=", bench.stress_suite.sample_id_from_wire(sample_wire)), "\n"))
+        }
+        let full_result_wire = runtime.decode_loop.timed_decode_result_wire(full_timed_wire)
+        let paged_result_wire = runtime.decode_loop.timed_decode_result_wire(paged_timed_wire)
+        let recent_result_wire = runtime.decode_loop.timed_decode_result_wire(recent_timed_wire)
+        let quant_result_wire = runtime.decode_loop.timed_decode_result_wire(quant_timed_wire)
+        let fidelity_result_wire = runtime.decode_loop.timed_decode_result_wire(fidelity_timed_wire)
+        let baseline_generated_token_ids_wire = runtime.decode_loop.generated_token_ids_wire(full_result_wire)
+        let baseline_generated_text = runtime.decode_loop.generated_text(full_result_wire)
+        let full_cmp_wire = bench.metrics.compare_wire(baseline_generated_token_ids_wire, baseline_generated_token_ids_wire, baseline_generated_text, baseline_generated_text, target_hint)
+        let paged_cmp_wire = bench.metrics.compare_wire(baseline_generated_token_ids_wire, runtime.decode_loop.generated_token_ids_wire(paged_result_wire), baseline_generated_text, runtime.decode_loop.generated_text(paged_result_wire), target_hint)
+        let recent_cmp_wire = bench.metrics.compare_wire(baseline_generated_token_ids_wire, runtime.decode_loop.generated_token_ids_wire(recent_result_wire), baseline_generated_text, runtime.decode_loop.generated_text(recent_result_wire), target_hint)
+        let quant_cmp_wire = bench.metrics.compare_wire(baseline_generated_token_ids_wire, runtime.decode_loop.generated_token_ids_wire(quant_result_wire), baseline_generated_text, runtime.decode_loop.generated_text(quant_result_wire), target_hint)
+        let fidelity_cmp_wire = bench.metrics.compare_wire(baseline_generated_token_ids_wire, runtime.decode_loop.generated_token_ids_wire(fidelity_result_wire), baseline_generated_text, runtime.decode_loop.generated_text(fidelity_result_wire), target_hint)
+        if trace_enabled() == 1 {
+            discard term.write(str.concat(str.concat("FPA_TRACE_BENCH_COMPARE_DONE sample_id=", bench.stress_suite.sample_id_from_wire(sample_wire)), "\n"))
+        }
+        let full_row_wire = sample_row_wire_from_timed_result(budget_label, hot_budget_pct, sample_wire, "full_kv", full_timed_wire, full_result_wire, full_cmp_wire)
+        sample_batch_wire = append_wire(sample_batch_wire, full_row_wire)
+        failure_batch_wire = append_failure_wire(failure_batch_wire, full_row_wire, should_record_failure_from_fields("full_kv", bench.metrics.exact_match(full_cmp_wire), bench.metrics.contains_target(full_cmp_wire), runtime.decode_loop.parity_match(full_result_wire)))
+        if trace_enabled() == 1 {
+            discard term.write(str.concat(str.concat("FPA_TRACE_BENCH_ROW_DONE sample_id=", bench.stress_suite.sample_id_from_wire(sample_wire)), " full_kv\n"))
+        }
+        let paged_row_wire = sample_row_wire_from_timed_result(budget_label, hot_budget_pct, sample_wire, "paged_full_kv", paged_timed_wire, full_result_wire, paged_cmp_wire)
+        sample_batch_wire = append_wire(sample_batch_wire, paged_row_wire)
+        failure_batch_wire = append_failure_wire(failure_batch_wire, paged_row_wire, should_record_failure_from_fields("paged_full_kv", bench.metrics.exact_match(paged_cmp_wire), bench.metrics.contains_target(paged_cmp_wire), runtime.decode_loop.parity_match(paged_result_wire)))
+        if trace_enabled() == 1 {
+            discard term.write(str.concat(str.concat("FPA_TRACE_BENCH_ROW_DONE sample_id=", bench.stress_suite.sample_id_from_wire(sample_wire)), " paged_full_kv\n"))
+        }
+        let recent_row_wire = sample_row_wire_from_timed_result(budget_label, hot_budget_pct, sample_wire, "recent_only", recent_timed_wire, full_result_wire, recent_cmp_wire)
+        sample_batch_wire = append_wire(sample_batch_wire, recent_row_wire)
+        failure_batch_wire = append_failure_wire(failure_batch_wire, recent_row_wire, should_record_failure_from_fields("recent_only", bench.metrics.exact_match(recent_cmp_wire), bench.metrics.contains_target(recent_cmp_wire), runtime.decode_loop.parity_match(recent_result_wire)))
+        if trace_enabled() == 1 {
+            discard term.write(str.concat(str.concat("FPA_TRACE_BENCH_ROW_DONE sample_id=", bench.stress_suite.sample_id_from_wire(sample_wire)), " recent_only\n"))
+        }
+        let quant_row_wire = sample_row_wire_from_timed_result(budget_label, hot_budget_pct, sample_wire, "quantized_old_kv", quant_timed_wire, full_result_wire, quant_cmp_wire)
+        sample_batch_wire = append_wire(sample_batch_wire, quant_row_wire)
+        failure_batch_wire = append_failure_wire(failure_batch_wire, quant_row_wire, should_record_failure_from_fields("quantized_old_kv", bench.metrics.exact_match(quant_cmp_wire), bench.metrics.contains_target(quant_cmp_wire), runtime.decode_loop.parity_match(quant_result_wire)))
+        if trace_enabled() == 1 {
+            discard term.write(str.concat(str.concat("FPA_TRACE_BENCH_ROW_DONE sample_id=", bench.stress_suite.sample_id_from_wire(sample_wire)), " quantized_old_kv\n"))
+        }
+        let fidelity_row_wire = sample_row_wire_from_timed_result(budget_label, hot_budget_pct, sample_wire, "fidelity_paged_kv", fidelity_timed_wire, full_result_wire, fidelity_cmp_wire)
+        sample_batch_wire = append_wire(sample_batch_wire, fidelity_row_wire)
+        failure_batch_wire = append_failure_wire(failure_batch_wire, fidelity_row_wire, should_record_failure_from_fields("fidelity_paged_kv", bench.metrics.exact_match(fidelity_cmp_wire), bench.metrics.contains_target(fidelity_cmp_wire), runtime.decode_loop.parity_match(fidelity_result_wire)))
+        if trace_enabled() == 1 {
+            discard term.write(str.concat(str.concat("FPA_TRACE_BENCH_ROW_DONE sample_id=", bench.stress_suite.sample_id_from_wire(sample_wire)), " fidelity_paged_kv\n"))
+        }
+        sample_rows_wire = append_rows_wire(sample_rows_wire, sample_batch_wire)
+        failure_rows_wire = append_rows_wire(failure_rows_wire, failure_batch_wire)
+        if trace_enabled() == 1 {
+            discard term.write(str.concat(str.concat(str.concat("FPA_TRACE_BENCH_ROWS sample_id=", bench.stress_suite.sample_id_from_wire(sample_wire)), str.concat(" sample_rows=", str.from_i32(collection_count(sample_rows_wire)))), "\n"))
+        }
+        idx = idx + 1
+    }
+    if trace_enabled() == 1 {
+        discard term.write(str.concat(str.concat("FPA_TRACE_BENCH_LOOP_DONE sample_rows=", str.from_i32(collection_count(sample_rows_wire))), "\n"))
+    }
+    let report_wire = benchmark_report_wire_from_rows_wire(budget_label, hot_budget_pct, suite_size, sample_rows_wire)
+    let report_json = benchmark_report_json_from_wire_direct(report_wire)
+    let prefix = budget_prefix(budget_label)
+    if trace_enabled() == 1 {
+        discard term.write(str.concat(str.concat("FPA_TRACE_BENCH_WRITE prefix=", prefix), "\n"))
+    }
+    discard fs.write_file(str.concat(prefix, "_report_wire.txt"), report_wire)
+    discard fs.write_file(str.concat(prefix, "_report_json.txt"), report_json)
+    discard fs.write_file(str.concat(prefix, "_samples_wire.txt"), sample_rows_wire)
+    discard fs.write_file(str.concat(prefix, "_failures_wire.txt"), failure_rows_wire)
+    discard fs.write_file(str.concat(prefix, "_samples_jsonl"), rows_jsonl_from_wire(sample_rows_wire))
+    discard fs.write_file(str.concat(prefix, "_failures_jsonl"), rows_jsonl_from_wire(failure_rows_wire))
+    discard fs.write_file(str.concat(prefix, "_samples_csv"), str.concat(sample_csv_header(), str.concat("\n", rows_csv_body_from_wire(sample_rows_wire))))
+    discard fs.write_file(str.concat(prefix, "_failures_csv"), str.concat(sample_csv_header(), str.concat("\n", rows_csv_body_from_wire(failure_rows_wire))))
+    if trace_enabled() == 1 {
+        discard term.write(str.concat(str.concat("FPA_TRACE_BENCH_WRITE_DONE prefix=", prefix), "\n"))
+    }
+    return BenchmarkArtifacts {
+        report: benchmark_report_from_wire(report_wire), sample_rows_wire: sample_rows_wire, failure_rows_wire: failure_rows_wire,
+    }
+}
+fn row_json_from_wire(raw: str) -> str {
+    let payload = map.new()
+    discard map.set(payload, "budget_label", json.str(frame_value_at(raw, 0)))
+    discard map.set(payload, "hot_budget_pct", model.json_emit.i32(parse_decimal(frame_value_at(raw, 1))))
+    discard map.set(payload, "sample_id", json.str(frame_value_at(raw, 2)))
+    discard map.set(payload, "category", json.str(frame_value_at(raw, 3)))
+    discard map.set(payload, "policy_name", json.str(frame_value_at(raw, 4)))
+    discard map.set(payload, "prompt_text", json.str(frame_value_at(raw, 5)))
+    discard map.set(payload, "target_hint", json.str(frame_value_at(raw, 6)))
+    discard map.set(payload, "prompt_token_count", model.json_emit.i32(parse_decimal(frame_value_at(raw, 7))))
+    discard map.set(payload, "generated_tokens", model.json_emit.i32(parse_decimal(frame_value_at(raw, 8))))
+    discard map.set(payload, "generated_text", json.str(frame_value_at(raw, 9)))
+    discard map.set(payload, "generated_token_ids_wire", json.str(frame_value_at(raw, 10)))
+    discard map.set(payload, "baseline_generated_text", json.str(frame_value_at(raw, 11)))
+    discard map.set(payload, "baseline_generated_token_ids_wire", json.str(frame_value_at(raw, 12)))
+    discard map.set(payload, "exact_match", model.json_emit.i32(parse_decimal(frame_value_at(raw, 13))))
+    discard map.set(payload, "contains_target", model.json_emit.i32(parse_decimal(frame_value_at(raw, 14))))
+    discard map.set(payload, "matching_tokens", model.json_emit.i32(parse_decimal(frame_value_at(raw, 15))))
+    discard map.set(payload, "total_tokens", model.json_emit.i32(parse_decimal(frame_value_at(raw, 16))))
+    discard map.set(payload, "top1_agreement_pct", model.json_emit.i32(parse_decimal(frame_value_at(raw, 17))))
+    discard map.set(payload, "edit_distance", model.json_emit.i32(parse_decimal(frame_value_at(raw, 18))))
+    discard map.set(payload, "effective_bytes_total", model.json_emit.i32(parse_decimal(frame_value_at(raw, 19))))
+    discard map.set(payload, "block_remap_count_total", model.json_emit.i32(parse_decimal(frame_value_at(raw, 20))))
+    discard map.set(payload, "copy_on_write_count_total", model.json_emit.i32(parse_decimal(frame_value_at(raw, 21))))
+    discard map.set(payload, "old_pages_streamed_total", model.json_emit.i32(parse_decimal(frame_value_at(raw, 22))))
+    discard map.set(payload, "raw_pages_streamed_total", model.json_emit.i32(parse_decimal(frame_value_at(raw, 23))))
+    discard map.set(payload, "parity_match", model.json_emit.i32(parse_decimal(frame_value_at(raw, 24))))
+    discard map.set(payload, "ttft_ms", model.json_emit.i32(parse_decimal(frame_value_at(raw, 25))))
+    discard map.set(payload, "latency_ms", model.json_emit.i32(parse_decimal(frame_value_at(raw, 26))))
+    discard map.set(payload, "tokens_per_sec", model.json_emit.i32(parse_decimal(frame_value_at(raw, 27))))
+    discard map.set(payload, "steady_tokens_per_sec", model.json_emit.i32(parse_decimal(frame_value_at(raw, 28))))
+    return json.object(payload)
+}
+fn row_csv_from_wire(raw: str) -> str {
+    return str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(sanitize_csv(frame_value_at(raw, 0)), ","), frame_value_at(raw, 1)), str.concat(",", sanitize_csv(frame_value_at(raw, 2)))), str.concat(",", sanitize_csv(frame_value_at(raw, 3)))), str.concat(",", sanitize_csv(frame_value_at(raw, 4)))), str.concat(",", frame_value_at(raw, 7))), str.concat(",", frame_value_at(raw, 8))), str.concat(",", frame_value_at(raw, 13))), str.concat(",", frame_value_at(raw, 14))), str.concat(",", frame_value_at(raw, 15))), str.concat(",", frame_value_at(raw, 16))), str.concat(",", frame_value_at(raw, 17))), str.concat(",", frame_value_at(raw, 18))), str.concat(",", frame_value_at(raw, 19))), str.concat(",", frame_value_at(raw, 20))), str.concat(",", frame_value_at(raw, 21))), str.concat(",", frame_value_at(raw, 22))), str.concat(",", frame_value_at(raw, 23))), str.concat(",", frame_value_at(raw, 24))), str.concat(str.concat(",", sanitize_csv(frame_value_at(raw, 6))), str.concat(",", sanitize_csv(frame_value_at(raw, 9)))))
+}
+fn run_budget_bundle(shape: model.EngineShape, model_dir: str, page_tokens: i32, budget_label: str, hot_budget_pct: i32) -> str {
+    discard run_budget_detailed(shape, model_dir, page_tokens, budget_label, hot_budget_pct)
+    return budget_bundle_from_written_files(budget_label)
+}
+fn run_detailed(shape: model.EngineShape, model_dir: str, page_tokens: i32, hot_budget_pct: i32) -> BenchmarkArtifacts {
+    return run_budget_detailed(shape, model_dir, page_tokens, str.from_i32(hot_budget_pct), hot_budget_pct)
+}
+fn run_matrix_detailed(shape: model.EngineShape, model_dir: str, page_tokens: i32, default_hot_budget_pct: i32) -> BenchmarkMatrixArtifacts {
+    trace_line("bench_run_begin") let _default_hot_budget_pct = default_hot_budget_pct let settings_count = 5 if trace_enabled() == 1 {
+        discard term.write(str.concat(str.concat("FPA_TRACE_BENCH settings_count=", str.from_i32(settings_count)), "\n"))
+    }
+    if smoke_profile_enabled(model_dir) == 1 {
+        let budget50 = run_budget_bundle(shape, model_dir, page_tokens, "50", 50)
+        return BenchmarkMatrixArtifacts {
+            budget_count: 1, budget_reports_wire: append_wire("", bundle_part_at(budget50, 0)), sample_rows_wire: bundle_part_at(budget50, 2), failure_rows_wire: bundle_part_at(budget50, 3),
+        }
+    }
+    trace_line("budget_50_begin")
+    let budget50 = run_budget_bundle_from_child(model_dir, page_tokens, "50", 50)
+    trace_line("budget_50_done")
+    trace_line("budget_25_begin")
+    let budget25 = run_budget_bundle_from_child(model_dir, page_tokens, "25", 25)
+    trace_line("budget_25_done")
+    trace_line("budget_12_5_begin")
+    let budget12_5 = run_budget_bundle_from_child(model_dir, page_tokens, "12.5", 13)
+    trace_line("budget_12_5_done")
+    trace_line("budget_6_25_begin")
+    let budget6_25 = run_budget_bundle_from_child(model_dir, page_tokens, "6.25", 6)
+    trace_line("budget_6_25_done")
+    trace_line("budget_0_begin")
+    let budget0 = run_budget_bundle_from_child(model_dir, page_tokens, "0", 0)
+    trace_line("budget_0_done")
+    let mut budget_reports_wire = ""
+    budget_reports_wire = append_wire(budget_reports_wire, bundle_part_at(budget50, 0))
+    budget_reports_wire = append_wire(budget_reports_wire, bundle_part_at(budget25, 0))
+    budget_reports_wire = append_wire(budget_reports_wire, bundle_part_at(budget12_5, 0))
+    budget_reports_wire = append_wire(budget_reports_wire, bundle_part_at(budget6_25, 0))
+    budget_reports_wire = append_wire(budget_reports_wire, bundle_part_at(budget0, 0))
+    let mut sample_rows_wire = ""
+    sample_rows_wire = append_rows_wire(sample_rows_wire, bundle_part_at(budget50, 2))
+    sample_rows_wire = append_rows_wire(sample_rows_wire, bundle_part_at(budget25, 2))
+    sample_rows_wire = append_rows_wire(sample_rows_wire, bundle_part_at(budget12_5, 2))
+    sample_rows_wire = append_rows_wire(sample_rows_wire, bundle_part_at(budget6_25, 2))
+    sample_rows_wire = append_rows_wire(sample_rows_wire, bundle_part_at(budget0, 2))
+    let mut failure_rows_wire = ""
+    failure_rows_wire = append_rows_wire(failure_rows_wire, bundle_part_at(budget50, 3))
+    failure_rows_wire = append_rows_wire(failure_rows_wire, bundle_part_at(budget25, 3))
+    failure_rows_wire = append_rows_wire(failure_rows_wire, bundle_part_at(budget12_5, 3))
+    failure_rows_wire = append_rows_wire(failure_rows_wire, bundle_part_at(budget6_25, 3))
+    failure_rows_wire = append_rows_wire(failure_rows_wire, bundle_part_at(budget0, 3))
+    if trace_enabled() == 1 {
+        discard term.write(str.concat(str.concat("FPA_TRACE_BENCH report_count=", str.from_i32(collection_count(budget_reports_wire))), "\n"))
+    }
+    return BenchmarkMatrixArtifacts {
+        budget_count: settings_count, budget_reports_wire: budget_reports_wire, sample_rows_wire: sample_rows_wire, failure_rows_wire: failure_rows_wire,
+    }
+}
+fn run_matrix_bundle(shape: model.EngineShape, model_dir: str, page_tokens: i32, default_hot_budget_pct: i32) -> str {
+    trace_line("bench_run_begin")
+    let _default_hot_budget_pct = default_hot_budget_pct
+    let settings_count = 5
+    if trace_enabled() == 1 {
+        discard term.write(str.concat(str.concat("FPA_TRACE_BENCH settings_count=", str.from_i32(settings_count)), "\n"))
+    }
+    if smoke_profile_enabled(model_dir) == 1 {
+        let budget50 = run_budget_bundle(shape, model_dir, page_tokens, "50", 50)
+        return frame_push(frame_push(frame_push("", append_wire("", bundle_part_at(budget50, 0))), bundle_part_at(budget50, 2)), bundle_part_at(budget50, 3))
+    }
+    trace_line("budget_50_begin")
+    discard run_budget_bundle_from_child(model_dir, page_tokens, "50", 50)
+    let budget50 = budget_bundle_from_written_files("50")
+    trace_line("budget_50_done")
+    trace_line("budget_25_begin")
+    discard run_budget_bundle_from_child(model_dir, page_tokens, "25", 25)
+    let budget25 = budget_bundle_from_written_files("25")
+    trace_line("budget_25_done")
+    trace_line("budget_12_5_begin")
+    discard run_budget_bundle_from_child(model_dir, page_tokens, "12.5", 13)
+    let budget12_5 = budget_bundle_from_written_files("12.5")
+    trace_line("budget_12_5_done")
+    trace_line("budget_6_25_begin")
+    discard run_budget_bundle_from_child(model_dir, page_tokens, "6.25", 6)
+    let budget6_25 = budget_bundle_from_written_files("6.25")
+    trace_line("budget_6_25_done")
+    trace_line("budget_0_begin")
+    discard run_budget_bundle_from_child(model_dir, page_tokens, "0", 0)
+    let budget0 = budget_bundle_from_written_files("0")
+    trace_line("budget_0_done")
+    let mut budget_reports_wire = ""
+    budget_reports_wire = append_wire(budget_reports_wire, bundle_part_at(budget50, 0))
+    budget_reports_wire = append_wire(budget_reports_wire, bundle_part_at(budget25, 0))
+    budget_reports_wire = append_wire(budget_reports_wire, bundle_part_at(budget12_5, 0))
+    budget_reports_wire = append_wire(budget_reports_wire, bundle_part_at(budget6_25, 0))
+    budget_reports_wire = append_wire(budget_reports_wire, bundle_part_at(budget0, 0))
+    let mut sample_rows_wire = ""
+    sample_rows_wire = append_rows_wire(sample_rows_wire, bundle_part_at(budget50, 2))
+    sample_rows_wire = append_rows_wire(sample_rows_wire, bundle_part_at(budget25, 2))
+    sample_rows_wire = append_rows_wire(sample_rows_wire, bundle_part_at(budget12_5, 2))
+    sample_rows_wire = append_rows_wire(sample_rows_wire, bundle_part_at(budget6_25, 2))
+    sample_rows_wire = append_rows_wire(sample_rows_wire, bundle_part_at(budget0, 2))
+    let mut failure_rows_wire = ""
+    failure_rows_wire = append_rows_wire(failure_rows_wire, bundle_part_at(budget50, 3))
+    failure_rows_wire = append_rows_wire(failure_rows_wire, bundle_part_at(budget25, 3))
+    failure_rows_wire = append_rows_wire(failure_rows_wire, bundle_part_at(budget12_5, 3))
+    failure_rows_wire = append_rows_wire(failure_rows_wire, bundle_part_at(budget6_25, 3))
+    failure_rows_wire = append_rows_wire(failure_rows_wire, bundle_part_at(budget0, 3))
+    if trace_enabled() == 1 {
+        discard term.write(str.concat(str.concat("FPA_TRACE_BENCH report_count=", str.from_i32(collection_count(budget_reports_wire))), "\n"))
+    }
+    return frame_push(frame_push(frame_push("", budget_reports_wire), sample_rows_wire), failure_rows_wire)
+}
+fn matrix_budget_reports_wire(bundle: str) -> str {
+    return frame_value_at(bundle, 0)
+}
+fn matrix_sample_rows_wire(bundle: str) -> str {
+    return frame_value_at(bundle, 1)
+}
+fn matrix_failure_rows_wire(bundle: str) -> str {
+    return frame_value_at(bundle, 2)
+}
+fn budget_safe_label(budget_label: str) -> str {
+    if budget_label == "50" {
+        return "50"
+    }
+    if budget_label == "25" {
+        return "25"
+    }
+    if budget_label == "12.5" {
+        return "12_5"
+    }
+    if budget_label == "6.25" {
+        return "6_25"
+    }
+    if budget_label == "0" {
+        return "0"
+    }
+    return "unknown"
+}
+fn budget_label_from_pct(hot_budget_pct: i32) -> str {
+    if hot_budget_pct >= 50 {
+        return "50"
+    }
+    if hot_budget_pct >= 25 {
+        return "25"
+    }
+    if hot_budget_pct >= 13 {
+        return "12.5"
+    }
+    if hot_budget_pct >= 6 {
+        return "6.25"
+    }
+    return "0"
+}
+fn aggregate_wire_for_policy(sample_rows_wire: str, policy_name: str) -> str {
+    let total_rows = collection_count(sample_rows_wire)
+    let mut sample_count = 0
+    let mut exact_match_count = 0
+    let mut contains_target_count = 0
+    let mut matching_tokens = 0
+    let mut total_tokens = 0
+    let mut effective_bytes_total = 0
+    let mut block_remaps_total = 0
+    let mut old_pages_total = 0
+    let mut raw_pages_total = 0
+    let mut ttft_ms_total = 0
+    let mut latency_ms_total = 0
+    let mut tokens_per_sec_total = 0
+    let mut steady_tokens_per_sec_total = 0
+    let mut idx = 0
+    while idx < total_rows {
+        let row_wire = collection_item_at(sample_rows_wire, idx)
+        if frame_value_at(row_wire, 4) == policy_name {
+            sample_count = sample_count + 1
+            exact_match_count = exact_match_count + parse_decimal(frame_value_at(row_wire, 13))
+            contains_target_count = contains_target_count + parse_decimal(frame_value_at(row_wire, 14))
+            matching_tokens = matching_tokens + parse_decimal(frame_value_at(row_wire, 15))
+            total_tokens = total_tokens + parse_decimal(frame_value_at(row_wire, 16))
+            effective_bytes_total = effective_bytes_total + parse_decimal(frame_value_at(row_wire, 19))
+            block_remaps_total = block_remaps_total + parse_decimal(frame_value_at(row_wire, 20))
+            old_pages_total = old_pages_total + parse_decimal(frame_value_at(row_wire, 22))
+            raw_pages_total = raw_pages_total + parse_decimal(frame_value_at(row_wire, 23))
+            ttft_ms_total = ttft_ms_total + parse_decimal(frame_value_at(row_wire, 25))
+            latency_ms_total = latency_ms_total + parse_decimal(frame_value_at(row_wire, 26))
+            tokens_per_sec_total = tokens_per_sec_total + parse_decimal(frame_value_at(row_wire, 27))
+            steady_tokens_per_sec_total = steady_tokens_per_sec_total + parse_decimal(frame_value_at(row_wire, 28))
+        }
+        idx = idx + 1
+    }
+    return aggregate_wire_from_fields_full(policy_name, sample_count, exact_match_count, contains_target_count, matching_tokens, total_tokens, effective_bytes_total, block_remaps_total, old_pages_total, raw_pages_total, ttft_ms_total, latency_ms_total, tokens_per_sec_total, steady_tokens_per_sec_total)
+}
+fn benchmark_report_wire_from_rows_wire(budget_label: str, hot_budget_pct: i32, suite_size: i32, sample_rows_wire: str) -> str {
+    let mut wire = ""
+    wire = frame_push(wire, budget_label)
+    wire = frame_push(wire, str.from_i32(hot_budget_pct))
+    wire = frame_push(wire, str.from_i32(suite_size))
+    wire = frame_push(wire, aggregate_wire_for_policy(sample_rows_wire, "full_kv"))
+    wire = frame_push(wire, aggregate_wire_for_policy(sample_rows_wire, "paged_full_kv"))
+    wire = frame_push(wire, aggregate_wire_for_policy(sample_rows_wire, "recent_only"))
+    wire = frame_push(wire, aggregate_wire_for_policy(sample_rows_wire, "quantized_old_kv"))
+    wire = frame_push(wire, aggregate_wire_for_policy(sample_rows_wire, "fidelity_paged_kv"))
+    return wire
+}
+fn aggregate_json_from_wire_direct(raw: str, fallback_policy_name: str) -> str {
+    let policy_name = frame_value_at(raw, 0) let sample_count = parse_decimal(frame_value_at(raw, 1)) let exact_match_count = parse_decimal(frame_value_at(raw, 2)) let contains_target_count = parse_decimal(frame_value_at(raw, 3)) let matching_tokens = parse_decimal(frame_value_at(raw, 4)) let total_tokens = parse_decimal(frame_value_at(raw, 5)) let effective_total = parse_decimal(frame_value_at(raw, 7)) * total_tokens let remaps_total = parse_decimal(frame_value_at(raw, 8)) * sample_count let old_pages_total = parse_decimal(frame_value_at(raw, 9)) * sample_count let raw_pages_total = parse_decimal(frame_value_at(raw, 10)) * sample_count let ttft_ms_total = parse_decimal(frame_value_at(raw, 11)) * sample_count let latency_ms_total = parse_decimal(frame_value_at(raw, 12)) * sample_count let tokens_per_sec_total = parse_decimal(frame_value_at(raw, 13)) * sample_count let steady_tokens_per_sec_total = parse_decimal(frame_value_at(raw, 14)) * sample_count return aggregate_json_from_full(if policy_name == "" { fallback_policy_name } else { policy_name }, sample_count, exact_match_count, contains_target_count, matching_tokens, total_tokens, effective_total, remaps_total, old_pages_total, raw_pages_total, ttft_ms_total, latency_ms_total, tokens_per_sec_total, steady_tokens_per_sec_total)
+}
+fn benchmark_report_json_from_wire_direct(raw: str) -> str {
+    return str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat("{\"budget_label\":", json.str(frame_value_at(raw, 0))), str.concat(",\"hot_budget_pct\":", str.from_i32(parse_decimal(frame_value_at(raw, 1))))), str.concat(",\"suite_size\":", str.from_i32(parse_decimal(frame_value_at(raw, 2))))), str.concat(",\"full_kv\":", aggregate_json_from_wire_direct(frame_value_at(raw, 3), "full_kv"))), str.concat(",\"paged_full_kv\":", aggregate_json_from_wire_direct(frame_value_at(raw, 4), "paged_full_kv"))), str.concat(",\"recent_only\":", aggregate_json_from_wire_direct(frame_value_at(raw, 5), "recent_only"))), str.concat(",\"quantized_old_kv\":", aggregate_json_from_wire_direct(frame_value_at(raw, 6), "quantized_old_kv"))), str.concat(str.concat(",\"fidelity_paged_kv\":", aggregate_json_from_wire_direct(frame_value_at(raw, 7), "fidelity_paged_kv")), "}"))
+}
+fn sanitize_csv(text: str) -> str {
+    let mut out = ""
+    let mut idx = 0
+    while idx < str.len(text) {
+        let ch = str.slice(text, idx, idx + 1)
+        if ch == "," || ch == "\n" || ch == "\r" {
+            out = str.concat(out, " ")
+        } else if ch == "\"" {
+            out = str.concat(out, "'")
+        } else {
+            out = str.concat(out, ch)
+        }
+        idx = idx + 1
+    }
+    return out
+}
+fn append_text_block(out: str, block: str) -> str {
+    if block == "" {
+        return out
+    }
+    if out == "" {
+        return block
+    }
+    return str.concat(out, block)
+}
+fn sample_csv_header() -> str {
+    return "budget_label,hot_budget_pct,sample_id,category,policy_name,prompt_token_count,generated_tokens,exact_match,contains_target,matching_tokens,total_tokens,top1_agreement_pct,edit_distance,effective_bytes_total,block_remap_count_total,copy_on_write_count_total,old_pages_streamed_total,raw_pages_streamed_total,parity_match,ttft_ms,latency_ms,tokens_per_sec,steady_tokens_per_sec,target_hint,generated_text"
+}
+fn aggregate_csv_row(report: BenchmarkReport, aggregate: PolicyAggregate) -> str {
+    let mut out = ""
+    out = str.concat(out, sanitize_csv(report.budget_label))
+    out = str.concat(out, ",")
+    out = str.concat(out, str.from_i32(report.hot_budget_pct))
+    out = str.concat(out, ",")
+    out = str.concat(out, sanitize_csv(aggregate.policy_name))
+    out = str.concat(out, ",")
+    out = str.concat(out, str.from_i32(aggregate.sample_count))
+    out = str.concat(out, ",")
+    out = str.concat(out, str.from_i32(aggregate.exact_match_count))
+    out = str.concat(out, ",")
+    out = str.concat(out, str.from_i32(aggregate.contains_target_count))
+    out = str.concat(out, ",")
+    out = str.concat(out, str.from_i32(aggregate.matching_tokens))
+    out = str.concat(out, ",")
+    out = str.concat(out, str.from_i32(aggregate.total_tokens))
+    out = str.concat(out, ",")
+    out = str.concat(out, str.from_i32(aggregate.top1_agreement_pct))
+    out = str.concat(out, ",")
+    out = str.concat(out, str.from_i32(aggregate.avg_effective_bytes_per_token))
+    out = str.concat(out, ",")
+    out = str.concat(out, str.from_i32(aggregate.avg_block_remaps_per_sample))
+    out = str.concat(out, ",")
+    out = str.concat(out, str.from_i32(aggregate.avg_old_pages_streamed))
+    out = str.concat(out, ",")
+    out = str.concat(out, str.from_i32(aggregate.avg_raw_pages_streamed))
+    out = str.concat(out, ",")
+    out = str.concat(out, str.from_i32(aggregate.avg_ttft_ms))
+    out = str.concat(out, ",")
+    out = str.concat(out, str.from_i32(aggregate.avg_latency_ms))
+    out = str.concat(out, ",")
+    out = str.concat(out, str.from_i32(aggregate.avg_tokens_per_sec))
+    out = str.concat(out, ",")
+    out = str.concat(out, str.from_i32(aggregate.avg_steady_tokens_per_sec))
+    return out
+}
+fn sample_csv_row(row: SampleRow) -> str {
+    return str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(sanitize_csv(row.budget_label), ","), str.from_i32(row.hot_budget_pct)), str.concat(",", sanitize_csv(row.sample_id))), str.concat(",", sanitize_csv(row.category))), str.concat(",", sanitize_csv(row.policy_name))), str.concat(",", str.from_i32(row.prompt_token_count))), str.concat(",", str.from_i32(row.generated_tokens))), str.concat(",", str.from_i32(row.exact_match))), str.concat(",", str.from_i32(row.contains_target))), str.concat(",", str.from_i32(row.matching_tokens))), str.concat(",", str.from_i32(row.total_tokens))), str.concat(",", str.from_i32(row.top1_agreement_pct))), str.concat(",", str.from_i32(row.edit_distance))), str.concat(",", str.from_i32(row.effective_bytes_total))), str.concat(",", str.from_i32(row.block_remap_count_total))), str.concat(",", str.from_i32(row.copy_on_write_count_total))), str.concat(",", str.from_i32(row.old_pages_streamed_total))), str.concat(",", str.from_i32(row.raw_pages_streamed_total))), str.concat(",", str.from_i32(row.parity_match))), str.concat(",", str.from_i32(row.ttft_ms))), str.concat(",", str.from_i32(row.latency_ms))), str.concat(",", str.from_i32(row.tokens_per_sec))), str.concat(",", str.from_i32(row.steady_tokens_per_sec))), str.concat(str.concat(",", sanitize_csv(row.target_hint)), str.concat(",", sanitize_csv(row.generated_text))))
+}
+fn rows_jsonl_from_wire(rows_wire: str) -> str {
+    let row_count = collection_count(rows_wire)
+    let mut out = ""
+    let mut idx = 0
+    while idx < row_count {
+        let row_wire = collection_item_at(rows_wire, idx)
+        out = str.concat(out, row_json_from_wire(row_wire))
+        if idx + 1 < row_count {
+            out = str.concat(out, "\n")
+        }
+        idx = idx + 1
+    }
+    return out
+}
+fn rows_csv_body_from_wire(rows_wire: str) -> str {
+    let row_count = collection_count(rows_wire)
+    let mut out = ""
+    let mut idx = 0
+    while idx < row_count {
+        let row_wire = collection_item_at(rows_wire, idx)
+        out = str.concat(out, row_csv_from_wire(row_wire))
+        if idx + 1 < row_count {
+            out = str.concat(out, "\n")
+        }
+        idx = idx + 1
+    }
+    return out
+}
+fn failure_count_by_budget_and_policy(rows_wire: str, budget_label: str, policy_name: str) -> i32 {
+    let row_count = collection_count(rows_wire) let mut total = 0 let mut idx = 0 while idx < row_count {
+        let row = sample_row_from_wire(collection_item_at(rows_wire, idx)) if row.budget_label == budget_label && row.policy_name == policy_name {
+            total = total + 1
+        }
+        idx = idx + 1
+    }
+    return total
+}
+fn markdown_policy_row(report: BenchmarkReport, aggregate: PolicyAggregate, failure_rows_wire: str) -> str {
+    return str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat("| ", report.budget_label), str.concat(" | ", aggregate.policy_name)), str.concat(" | ", str.from_i32(aggregate.sample_count))), str.concat(" | ", str.from_i32(aggregate.top1_agreement_pct))), str.concat(" | ", str.from_i32(aggregate.avg_effective_bytes_per_token))), str.concat(" | ", str.from_i32(aggregate.avg_block_remaps_per_sample))), str.concat(str.concat(" | ", str.from_i32(failure_count_by_budget_and_policy(failure_rows_wire, report.budget_label, aggregate.policy_name))), " |\n"))
+}
+fn policy_results_row(report: BenchmarkReport, aggregate: PolicyAggregate, failure_rows_wire: str) -> str {
+    return str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat("| ", report.budget_label), str.concat(" | ", aggregate.policy_name)), str.concat(" | ", str.from_i32(aggregate.sample_count))), str.concat(" | ", str.from_i32(aggregate.top1_agreement_pct))), str.concat(" | ", str.from_i32(aggregate.avg_effective_bytes_per_token))), str.concat(" | ", str.from_i32(aggregate.avg_block_remaps_per_sample))), str.concat(" | ", str.from_i32(aggregate.avg_old_pages_streamed))), str.concat(str.concat(" | ", str.from_i32(failure_count_by_budget_and_policy(failure_rows_wire, report.budget_label, aggregate.policy_name))), " |\n"))
+}
+fn append_failure_examples_text(out: str, failure_rows_wire: str, limit: i32, seen: i32) -> str {
+    let row_count = collection_count(failure_rows_wire) let mut next = out let mut idx = 0 let mut emitted = seen while idx < row_count && emitted < limit {
+        let row = sample_row_from_wire(collection_item_at(failure_rows_wire, idx)) next = str.concat(next, str.concat(str.concat(str.concat(str.concat(str.concat(str.concat(str.concat("- `", row.budget_label), "/"), row.policy_name), str.concat("/", row.sample_id)), "` top1="), str.from_i32(row.top1_agreement_pct)), str.concat("% parity=", str.concat(str.from_i32(row.parity_match), str.concat(" target=", str.concat(json.str(row.target_hint), "\n")))))) idx = idx + 1 emitted = emitted + 1
+    }
+    return next
+}
+fn matrix_prefix(model_dir: str) -> str {
+    return str.concat("fpa_bench_", str.concat(model.artifacts.model_id_from_dir(model_dir), "_matrix"))
+}
+fn hardware_label() -> str {
+    let configured = env.get("FPA_HARDWARE") if configured != "" {
+        return configured
+    }
+    return "Apple Silicon unified-memory host"
+}
+fn frame_push(frame: str, value: str) -> str {
+    return str.concat(str.concat(frame, str.from_i32(str.len(value))), str.concat("#", value))
+}
+fn frame_sep(frame: str, start: i32) -> i32 {
+    let mut idx = start while idx < str.len(frame) {
+        if str.slice(frame, idx, idx + 1) == "#" {
+            return idx
+        }
+        idx = idx + 1
+    }
+    return - 1
+}
+fn frame_skip_next(frame: str, start: i32) -> i32 {
+    let sep = frame_sep(frame, start)
+    if sep < 0 {
+        return str.len(frame)
+    }
+    let size = parse_decimal(str.slice(frame, start, sep))
+    let value_start = sep + 1
+    return value_start + size
+}
+fn frame_read_next(frame: str, start: i32) -> FrameRead {
+    let sep = frame_sep(frame, start) if sep < 0 {
+        return FrameRead {
+            value: "", next_idx: str.len(frame)
+        }
+    }
+    let size = parse_decimal(str.slice(frame, start, sep)) let value_start = sep + 1 let value_end = value_start + size return FrameRead {
+        value: str.slice(frame, value_start, value_end), next_idx: value_end,
+    }
+}
+fn frame_value_at(frame: str, position: i32) -> str {
+    let mut idx = 0 let mut current = 0 while idx < str.len(frame) {
+        let sep = frame_sep(frame, idx) if sep < 0 {
+            return ""
+        }
+        let size = parse_decimal(str.slice(frame, idx, sep)) let start = sep + 1 let end = start + size if current == position {
+            return str.slice(frame, start, end)
+        }
+        current = current + 1 idx = end
+    }
+    return ""
+}
+fn run(shape: model.EngineShape, model_dir: str, page_tokens: i32, hot_budget_pct: i32) -> BenchmarkReport {
+    return run_detailed(shape, model_dir, page_tokens, hot_budget_pct).report
+}
+fn matrix_artifacts_from_budget(artifacts: BenchmarkArtifacts) -> BenchmarkMatrixArtifacts {
+    return BenchmarkMatrixArtifacts {
+        budget_count: 1, budget_reports_wire: benchmark_report_wire(artifacts.report), sample_rows_wire: artifacts.sample_rows_wire, failure_rows_wire: artifacts.failure_rows_wire,
+    }
+}
+fn run_json(shape: model.EngineShape, model_dir: str, page_tokens: i32, hot_budget_pct: i32) -> str {
+    return benchmark_report_json(run(shape, model_dir, page_tokens, hot_budget_pct))
+}

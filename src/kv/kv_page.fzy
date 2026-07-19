@@ -1,0 +1,73 @@
+use model;
+#[repr(C)] enum Precision {
+    Raw, Int8, Int4, Dropped,
+}
+#[repr(C)] enum PageRole {
+    Recent, Old, Pinned, LateLayerProtected,
+}
+struct KVPage {
+    layer_id: i32, page_id: i32, start_token: i32, token_count: i32, k_precision: Precision, v_precision: Precision, role: PageRole, is_hot: i32,
+}
+fn precision_name(precision: Precision) -> str {
+    if precision == Precision::Raw {
+        return "raw"
+    }
+    if precision == Precision::Int8 {
+        return "int8"
+    }
+    if precision == Precision::Int4 {
+        return "int4"
+    }
+    return "dropped"
+}
+fn precision_from_name(name: str) -> Precision {
+    if name == "raw" {
+        return Precision::Raw
+    }
+    if name == "int8" {
+        return Precision::Int8
+    }
+    if name == "int4" {
+        return Precision::Int4
+    }
+    return Precision::Dropped
+}
+fn role_name(role: PageRole) -> str {
+    if role == PageRole::Recent {
+        return "recent"
+    }
+    if role == PageRole::Pinned {
+        return "pinned"
+    }
+    if role == PageRole::LateLayerProtected {
+        return "late_layer_protected"
+    }
+    return "old"
+}
+fn role_from_name(name: str) -> PageRole {
+    if name == "recent" {
+        return PageRole::Recent
+    }
+    if name == "pinned" {
+        return PageRole::Pinned
+    }
+    if name == "late_layer_protected" {
+        return PageRole::LateLayerProtected
+    }
+    return PageRole::Old
+}
+fn raw_page(layer_id: i32, page_id: i32, shape: model.EngineShape) -> KVPage {
+    return KVPage {
+        layer_id: layer_id, page_id: page_id, start_token: model.page_token_start(shape, page_id), token_count: shape.page_tokens, k_precision: Precision::Raw, v_precision: Precision::Raw, role: PageRole::Old, is_hot: 0,
+    }
+}
+fn configured_page(layer_id: i32, page_id: i32, shape: model.EngineShape, k_precision: Precision, v_precision: Precision, role: PageRole, is_hot: i32) -> KVPage {
+    return KVPage {
+        layer_id: layer_id, page_id: page_id, start_token: model.page_token_start(shape, page_id), token_count: shape.page_tokens, k_precision: k_precision, v_precision: v_precision, role: role, is_hot: is_hot,
+    }
+}
+fn explicit_page(layer_id: i32, page_id: i32, start_token: i32, token_count: i32, k_precision: Precision, v_precision: Precision, role: PageRole, is_hot: i32) -> KVPage {
+    return KVPage {
+        layer_id: layer_id, page_id: page_id, start_token: start_token, token_count: token_count, k_precision: k_precision, v_precision: v_precision, role: role, is_hot: is_hot,
+    }
+}

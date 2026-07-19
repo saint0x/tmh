@@ -1,0 +1,31 @@
+use attention;
+use kv;
+use model;
+use runtime.session;
+fn report(shape: model.EngineShape, cfg: runtime.session.SessionConfig, state: runtime.session.SessionState, prompt_token_ids_wire: str, decode_token_ids_wire: str) -> attention.AttentionReport {
+    return attention.attention_report_from_wire(report_wire(shape, cfg, state, prompt_token_ids_wire, decode_token_ids_wire))
+}
+
+fn report_wire(shape: model.EngineShape, cfg: runtime.session.SessionConfig, state: runtime.session.SessionState, prompt_token_ids_wire: str, decode_token_ids_wire: str) -> str {
+    return report_wire_with_manager(shape, cfg, state, prompt_token_ids_wire, decode_token_ids_wire, runtime.session.manager_of(shape, cfg.policy_name, state))
+}
+
+fn report_wire_with_manager(shape: model.EngineShape, cfg: runtime.session.SessionConfig, state: runtime.session.SessionState, prompt_token_ids_wire: str, decode_token_ids_wire: str, manager: runtime.block_manager.ManagedSession) -> str {
+    let query_position = attention.choose_target_token(state) let layer_id = attention.choose_target_layer(shape) let pool = runtime.block_manager.pool_of(manager) let table_refs_wire = runtime.block_manager.table_segment(manager.layer_tables_wire, layer_id) let mut page_id = 0 let mut attn_sum = 0 let mut output_sum = 0 let mut top_page = 0 let mut top_score = - 100000000 let mut effective_bytes_read = 0 let mut old_pages_streamed = 0 let mut raw_pages_streamed = 0 while page_id < kv.logical_block_table.refs_len(table_refs_wire) {
+        let reference = kv.logical_block_table.ref_at_from_refs(table_refs_wire, page_id) let block = kv.physical_block_pool.block_at(pool, reference.physical_block_id) let entry = attention.page_from_block(layer_id, page_id, block) let score = attention.page_score(state, prompt_token_ids_wire, decode_token_ids_wire, entry, layer_id, query_position, block.start_token, reference.token_count, shape.head_dim) let value_sum = attention.page_output_component(state, prompt_token_ids_wire, decode_token_ids_wire, entry, layer_id, query_position, block.start_token, reference.token_count, shape.head_dim) if score > - 99999999 {
+            attn_sum = attn_sum + score output_sum = output_sum + value_sum effective_bytes_read = effective_bytes_read + kv.physical_block_pool.encoded_bytes(shape, block) if entry.is_hot == 1 {
+                raw_pages_streamed = raw_pages_streamed + 1
+            } else {
+                old_pages_streamed = old_pages_streamed + 1
+            }
+            if score > top_score {
+                top_score = score top_page = page_id
+            }
+        }
+        page_id = page_id + 1
+    }
+    return attention.report_wire(cfg.policy_name, state.prompt_tokens, state.decode_tokens, state.used_pages, query_position, layer_id, attn_sum, output_sum, top_page, top_score, effective_bytes_read, old_pages_streamed, raw_pages_streamed, 0)
+}
+fn report_json(shape: model.EngineShape, cfg: runtime.session.SessionConfig, state: runtime.session.SessionState, parity_match: i32) -> str {
+    let value = report(shape, cfg, state, runtime.session.placeholder_sequence_wire(state.prompt_tokens), runtime.session.placeholder_sequence_range_wire(state.prompt_tokens, state.decode_tokens)) return attention.attention_report_json(value.policy_name, value.prompt_tokens, value.decode_tokens, value.used_pages, value.target_token, value.target_layer, value.attn_sum_x1000, value.output_sum_x1000, value.top_page, value.top_score_x1000, value.effective_bytes_read, value.old_pages_streamed, value.raw_pages_streamed, parity_match)
+}

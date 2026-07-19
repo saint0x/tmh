@@ -1,0 +1,251 @@
+use core.env;
+use model;
+struct StressSample {
+    sample_id: str, category: str, prompt: str, target_hint: str, max_new_tokens: i32,
+}
+struct FrameRead {
+    value: str, next_idx: i32,
+}
+fn frame_push(wire: str, value: str) -> str {
+    return str.concat(str.concat(str.concat(wire, str.from_i32(str.len(value))), "#"), value)
+}
+fn frame_sep(wire: str, start: i32) -> i32 {
+    let mut idx = start while idx < str.len(wire) {
+        if str.slice(wire, idx, idx + 1) == "#" {
+            return idx
+        }
+        idx = idx + 1
+    }
+    return - 1
+}
+fn frame_value_at(wire: str, position: i32) -> str {
+    if position < 0 {
+        return ""
+    }
+    let mut current = 0 let mut idx = 0 while idx < str.len(wire) {
+        let sep = frame_sep(wire, idx) if sep < 0 {
+            return ""
+        }
+        let size = model.artifacts.parse_i32(str.slice(wire, idx, sep)) let start = sep + 1 let end = start + size if current == position {
+            return str.slice(wire, start, end)
+        }
+        current = current + 1 idx = end
+    }
+    return ""
+}
+fn frame_read_next(wire: str, start: i32) -> FrameRead {
+    let sep = frame_sep(wire, start) if sep < 0 {
+        return FrameRead {
+            value: "", next_idx: str.len(wire)
+        }
+    }
+    let size = model.artifacts.parse_i32(str.slice(wire, start, sep)) let value_start = sep + 1 let value_end = value_start + size return FrameRead {
+        value: str.slice(wire, value_start, value_end), next_idx: value_end,
+    }
+}
+fn sample_wire(sample: StressSample) -> str {
+    let mut wire = "" wire = frame_push(wire, sample.sample_id) wire = frame_push(wire, sample.category) wire = frame_push(wire, sample.prompt) wire = frame_push(wire, sample.target_hint) wire = frame_push(wire, str.from_i32(sample.max_new_tokens)) return wire
+}
+fn from_wire(raw: str) -> StressSample {
+    let sample_id = frame_read_next(raw, 0) let category = frame_read_next(raw, sample_id.next_idx) let prompt = frame_read_next(raw, category.next_idx) let target_hint = frame_read_next(raw, prompt.next_idx) let max_new_tokens = frame_read_next(raw, target_hint.next_idx) return StressSample {
+        sample_id: sample_id.value, category: category.value, prompt: prompt.value, target_hint: target_hint.value, max_new_tokens: model.artifacts.parse_i32(max_new_tokens.value),
+    }
+}
+fn append_wire(wire: str, entry: str) -> str {
+    if wire == "" {
+        return entry
+    }
+    return str.concat(str.concat(wire, "\n"), entry)
+}
+fn count(wire: str) -> i32 {
+    if wire == "" {
+        return 0
+    }
+    let mut total = 1 let mut idx = 0 while idx < str.len(wire) {
+        if str.slice(wire, idx, idx + 1) == "\n" {
+            total = total + 1
+        }
+        idx = idx + 1
+    }
+    return total
+}
+fn sample_id_from_wire(raw: str) -> str {
+    return frame_value_at(raw, 0)
+}
+fn category_from_wire(raw: str) -> str {
+    return frame_value_at(raw, 1)
+}
+fn prompt_from_wire(raw: str) -> str {
+    return frame_value_at(raw, 2)
+}
+fn target_hint_from_wire(raw: str) -> str {
+    return frame_value_at(raw, 3)
+}
+fn max_new_tokens_from_wire(raw: str) -> i32 {
+    return model.artifacts.parse_i32(frame_value_at(raw, 4))
+}
+fn item_at(wire: str, position: i32) -> str {
+    if position < 0 || wire == "" {
+        return ""
+    }
+    let mut current = 0 let mut start = 0 let mut idx = 0 while idx <= str.len(wire) {
+        if idx == str.len(wire) || str.slice(wire, idx, idx + 1) == "\n" {
+            if current == position {
+                return str.slice(wire, start, idx)
+            }
+            current = current + 1 start = idx + 1
+        }
+        idx = idx + 1
+    }
+    return ""
+}
+fn padded(value: i32) -> str {
+    if value < 10 {
+        return str.concat("0", str.from_i32(value))
+    }
+    return str.from_i32(value)
+}
+fn default_suite_size() -> i32 {
+    return count(default_suite_wire())
+}
+fn sample_group(position: i32) -> i32 {
+    return position / 8
+}
+fn sample_variant(position: i32) -> i32 {
+    let group = sample_group(position) return position - (group * 8)
+}
+fn sample_tag(position: i32) -> str {
+    return padded(sample_group(position))
+}
+fn sample_id_at(position: i32) -> str {
+    let tag = sample_tag(position) let variant = sample_variant(position) if variant == 0 {
+        return str.concat("needle-alpha-", tag)
+    }
+    if variant == 1 {
+        return str.concat("number-ledger-", tag)
+    }
+    if variant == 2 {
+        return str.concat("name-anchor-", tag)
+    }
+    if variant == 3 {
+        return str.concat("instruction-persist-", tag)
+    }
+    if variant == 4 {
+        return str.concat("document-window-", tag)
+    }
+    if variant == 5 {
+        return str.concat("multi-hop-city-", tag)
+    }
+    if variant == 6 {
+        return str.concat("long-distractor-", tag)
+    }
+    return str.concat("exact-string-", tag)
+}
+fn category_at(position: i32) -> str {
+    let variant = sample_variant(position) if variant == 0 {
+        return "needle_recall"
+    }
+    if variant == 1 {
+        return "number_recall"
+    }
+    if variant == 2 {
+        return "name_recall"
+    }
+    if variant == 3 {
+        return "instruction_persistence"
+    }
+    if variant == 4 {
+        return "document_window"
+    }
+    if variant == 5 {
+        return "multi_hop"
+    }
+    if variant == 6 {
+        return "long_distractor"
+    }
+    return "exact_string"
+}
+fn prompt_at(position: i32) -> str {
+    let tag = sample_tag(position) let variant = sample_variant(position) let alpha = str.concat("ALPHA-", tag) let exact = str.concat("ZX-", str.concat(tag, "-Q")) let number = str.concat("48", str.concat(tag, "16")) let name = str.concat("Mira Chen ", tag) let section = str.concat("section-", tag) let city = str.concat("Kyoto-", tag) let payload = str.concat("ember-lake-", tag) let reply = str.concat("short-", tag) if variant == 0 {
+        return str.concat("Remember the code word ", str.concat(alpha, " and keep it available after a long irrelevant passage about planets, ledgers, adapters, floor plans, and office supplies."))
+    }
+    if variant == 1 {
+        return str.concat("Store the number ", str.concat(number, " and continue after distracting bookkeeping lines about invoices, receipts, date ranges, and branch reconciliations."))
+    }
+    if variant == 2 {
+        return str.concat("The contact name is ", str.concat(name, ". Several unrelated notes follow about weather shifts, shipping updates, room changes, and parking badges."))
+    }
+    if variant == 3 {
+        return str.concat("Answer in a compact style and keep the phrase ", str.concat(reply, " stable even when the prompt adds procedural noise, audit notes, and redundant clauses."))
+    }
+    if variant == 4 {
+        return str.concat("A report mentions ", str.concat(section, ", a missing appendix, and a delivery issue that must remain visible across the context window while unrelated logistics paragraphs accumulate."))
+    }
+    if variant == 5 {
+        return str.concat("If the artist lives in ", str.concat(city, " and the gallery is in Boston, keep both facts active while following several detours through schedules, catering notes, and museum rules."))
+    }
+    if variant == 6 {
+        return str.concat("The payload term is ", str.concat(payload, ". Add many filler references to cables, notebooks, batteries, server racks, docking stations, and transit cards before producing the continuation."))
+    }
+    return str.concat("Preserve the exact string ", str.concat(exact, " and continue deterministically after a cluttered paragraph about metrics, timings, runbooks, and hardware counters."))
+}
+fn target_hint_at(position: i32) -> str {
+    let tag = sample_tag(position) let variant = sample_variant(position) if variant == 0 {
+        return str.concat("ALPHA-", tag)
+    }
+    if variant == 1 {
+        return str.concat("48", str.concat(tag, "16"))
+    }
+    if variant == 2 {
+        return "Mira"
+    }
+    if variant == 3 {
+        return "short"
+    }
+    if variant == 4 {
+        return "section"
+    }
+    if variant == 5 {
+        return "Kyoto"
+    }
+    if variant == 6 {
+        return "ember"
+    }
+    return "ZX"
+}
+fn max_new_tokens_at(position: i32) -> i32 {
+    let variant = sample_variant(position) if variant == 2 || variant == 3 {
+        return 10
+    }
+    if variant == 4 || variant == 5 {
+        return 14
+    }
+    return 12
+}
+fn sample_at(position: i32) -> StressSample {
+    return StressSample {
+        sample_id: sample_id_at(position), category: category_at(position), prompt: prompt_at(position), target_hint: target_hint_at(position), max_new_tokens: max_new_tokens_at(position),
+    }
+}
+fn sample(sample_id: str, category: str, prompt: str, target_hint: str, max_new_tokens: i32) -> str {
+    let mut wire = "" wire = frame_push(wire, sample_id) wire = frame_push(wire, category) wire = frame_push(wire, prompt) wire = frame_push(wire, target_hint) wire = frame_push(wire, str.from_i32(max_new_tokens)) return wire
+}
+fn default_suite_wire() -> str {
+    let mut suite = "" let mut idx = 0 while idx < 15 {
+        let tag = padded(idx) let alpha = str.concat("ALPHA-", tag) let exact = str.concat("ZX-", str.concat(tag, "-Q")) let number = str.concat("48", str.concat(tag, "16")) let name = str.concat("Mira Chen ", tag) let section = str.concat("section-", tag) let city = str.concat("Kyoto-", tag) let payload = str.concat("ember-lake-", tag) let reply = str.concat("short-", tag) suite = append_wire(suite, sample(str.concat("needle-alpha-", tag), "needle_recall", str.concat("Remember the code word ", str.concat(alpha, " and keep it available after a long irrelevant passage about planets, ledgers, adapters, floor plans, and office supplies.")), alpha, 12)) suite = append_wire(suite, sample(str.concat("number-ledger-", tag), "number_recall", str.concat("Store the number ", str.concat(number, " and continue after distracting bookkeeping lines about invoices, receipts, date ranges, and branch reconciliations.")), number, 12)) suite = append_wire(suite, sample(str.concat("name-anchor-", tag), "name_recall", str.concat("The contact name is ", str.concat(name, ". Several unrelated notes follow about weather shifts, shipping updates, room changes, and parking badges.")), "Mira", 10)) suite = append_wire(suite, sample(str.concat("instruction-persist-", tag), "instruction_persistence", str.concat("Answer in a compact style and keep the phrase ", str.concat(reply, " stable even when the prompt adds procedural noise, audit notes, and redundant clauses.")), "short", 10)) suite = append_wire(suite, sample(str.concat("document-window-", tag), "document_window", str.concat("A report mentions ", str.concat(section, ", a missing appendix, and a delivery issue that must remain visible across the context window while unrelated logistics paragraphs accumulate.")), "section", 14)) suite = append_wire(suite, sample(str.concat("multi-hop-city-", tag), "multi_hop", str.concat("If the artist lives in ", str.concat(city, " and the gallery is in Boston, keep both facts active while following several detours through schedules, catering notes, and museum rules.")), "Kyoto", 14)) suite = append_wire(suite, sample(str.concat("long-distractor-", tag), "long_distractor", str.concat("The payload term is ", str.concat(payload, ". Add many filler references to cables, notebooks, batteries, server racks, docking stations, and transit cards before producing the continuation.")), "ember", 12)) suite = append_wire(suite, sample(str.concat("exact-string-", tag), "exact_string", str.concat("Preserve the exact string ", str.concat(exact, " and continue deterministically after a cluttered paragraph about metrics, timings, runbooks, and hardware counters.")), "ZX", 12)) idx = idx + 1
+    }
+    return suite
+}
+fn smoke_suite_wire() -> str {
+    return sample("exact-string-00", "exact_string", "Preserve the exact string ZX-00-Q and continue deterministically after a short cluttered paragraph about metrics, timings, runbooks, and hardware counters.", "ZX", 4)
+}
+fn selected_suite_wire(model_dir: str) -> str {
+    let profile = env.get("FPA_BENCH_PROFILE")
+    if profile == "full" {
+        return default_suite_wire()
+    }
+    if profile == "smoke" {
+        return smoke_suite_wire()
+    }
+    return default_suite_wire()
+}

@@ -1,0 +1,132 @@
+{
+  "base_url": "http://127.0.0.1:8000",
+  "cases": [],
+  "concurrency_levels": [
+    1,
+    2,
+    4
+  ],
+  "dry_run": true,
+  "elapsed_s": 0.0011,
+  "generated_at": "2026-07-19T04:01:47Z",
+  "label": "sock-qwen3-30b-a3b-gptq-int4",
+  "model": "Qwen/Qwen3-30B-A3B-GPTQ-Int4",
+  "ok": true,
+  "preflight": [
+    {
+      "case": "early_anchor_long_tail",
+      "category": "anchor_recall",
+      "effective_max_model_len": 2048,
+      "effective_max_tokens": 96,
+      "endpoint_max_model_len": 2048,
+      "original_max_tokens": 96,
+      "prompt_tokens": 1885,
+      "requested_max_model_len": 0,
+      "token_budget_margin": 4
+    },
+    {
+      "case": "middle_anchor_detour",
+      "category": "anchor_recall",
+      "effective_max_model_len": 2048,
+      "effective_max_tokens": 128,
+      "endpoint_max_model_len": 2048,
+      "original_max_tokens": 128,
+      "prompt_tokens": 1462,
+      "requested_max_model_len": 0,
+      "token_budget_margin": 4
+    },
+    {
+      "case": "late_anchor_control",
+      "category": "late_control",
+      "effective_max_model_len": 2048,
+      "effective_max_tokens": 96,
+      "endpoint_max_model_len": 2048,
+      "original_max_tokens": 96,
+      "prompt_tokens": 950,
+      "requested_max_model_len": 0,
+      "token_budget_margin": 4
+    },
+    {
+      "case": "decoy_collision",
+      "category": "confusable_recall",
+      "effective_max_model_len": 2048,
+      "effective_max_tokens": 128,
+      "endpoint_max_model_len": 2048,
+      "original_max_tokens": 128,
+      "prompt_tokens": 1014,
+      "requested_max_model_len": 0,
+      "token_budget_margin": 4
+    },
+    {
+      "case": "routing_table",
+      "category": "structured_lookup",
+      "effective_max_model_len": 2048,
+      "effective_max_tokens": 128,
+      "endpoint_max_model_len": 2048,
+      "original_max_tokens": 128,
+      "prompt_tokens": 988,
+      "requested_max_model_len": 0,
+      "token_budget_margin": 4
+    },
+    {
+      "case": "structured_records",
+      "category": "structured_lookup",
+      "effective_max_model_len": 2048,
+      "effective_max_tokens": 160,
+      "endpoint_max_model_len": 2048,
+      "original_max_tokens": 160,
+      "prompt_tokens": 999,
+      "requested_max_model_len": 0,
+      "token_budget_margin": 4
+    },
+    {
+      "case": "instruction_persistence",
+      "category": "instruction_retention",
+      "effective_max_model_len": 2048,
+      "effective_max_tokens": 128,
+      "endpoint_max_model_len": 2048,
+      "original_max_tokens": 128,
+      "prompt_tokens": 1896,
+      "requested_max_model_len": 0,
+      "token_budget_margin": 4
+    },
+    {
+      "case": "multi_hop_bridge",
+      "category": "multi_hop",
+      "effective_max_model_len": 2048,
+      "effective_max_tokens": 160,
+      "endpoint_max_model_len": 2048,
+      "original_max_tokens": 160,
+      "prompt_tokens": 963,
+      "requested_max_model_len": 0,
+      "token_budget_margin": 4
+    },
+    {
+      "case": "payload_dense",
+      "category": "dense_noise",
+      "effective_max_model_len": 2048,
+      "effective_max_tokens": 163,
+      "endpoint_max_model_len": 2048,
+      "original_max_tokens": 192,
+      "prompt_tokens": 1881,
+      "requested_max_model_len": 0,
+      "token_budget_margin": 4
+    },
+    {
+      "case": "long_generation_systems",
+      "category": "long_generation",
+      "effective_max_model_len": 2048,
+      "effective_max_tokens": 384,
+      "endpoint_max_model_len": 2048,
+      "original_max_tokens": 384,
+      "prompt_tokens": 523,
+      "requested_max_model_len": 0,
+      "token_budget_margin": 4
+    }
+  ],
+  "profile": "maxfit",
+  "runs": 0,
+  "stream_probe_enabled": false,
+  "stream_probes": [],
+  "warmup_runs": 0
+}

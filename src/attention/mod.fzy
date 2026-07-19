@@ -1,0 +1,334 @@
+mod fidelity_attention;
+mod full_attention;
+mod recent_only_attention;
+
+use kv;
+use model;
+use runtime;
+
+struct AttentionReport {
+    policy_name: str,
+    prompt_tokens: i32,
+    decode_tokens: i32,
+    used_pages: i32,
+    target_token: i32,
+    target_layer: i32,
+    attn_sum_x1000: i32,
+    output_sum_x1000: i32,
+    top_page: i32,
+    top_score_x1000: i32,
+    effective_bytes_read: i32,
+    old_pages_streamed: i32,
+    raw_pages_streamed: i32,
+    parity_match: i32,
+}
+
+fn frame_push(wire: str, value: str) -> str {
+    return runtime.block_manager.frame_push(wire, value)
+}
+
+fn frame_value_at(wire: str, position: i32) -> str {
+    return runtime.block_manager.frame_value_at(wire, position)
+}
+
+fn report_wire(policy_name: str, prompt_tokens: i32, decode_tokens: i32, used_pages: i32, target_token: i32, target_layer: i32, attn_sum_x1000: i32, output_sum_x1000: i32, top_page: i32, top_score_x1000: i32, effective_bytes_read: i32, old_pages_streamed: i32, raw_pages_streamed: i32, parity_match: i32) -> str {
+    let mut wire = ""
+    wire = frame_push(wire, policy_name)
+    wire = frame_push(wire, str.from_i32(prompt_tokens))
+    wire = frame_push(wire, str.from_i32(decode_tokens))
+    wire = frame_push(wire, str.from_i32(used_pages))
+    wire = frame_push(wire, str.from_i32(target_token))
+    wire = frame_push(wire, str.from_i32(target_layer))
+    wire = frame_push(wire, str.from_i32(attn_sum_x1000))
+    wire = frame_push(wire, str.from_i32(output_sum_x1000))
+    wire = frame_push(wire, str.from_i32(top_page))
+    wire = frame_push(wire, str.from_i32(top_score_x1000))
+    wire = frame_push(wire, str.from_i32(effective_bytes_read))
+    wire = frame_push(wire, str.from_i32(old_pages_streamed))
+    wire = frame_push(wire, str.from_i32(raw_pages_streamed))
+    wire = frame_push(wire, str.from_i32(parity_match))
+    return wire
+}
+
+fn wire_str(wire: str, position: i32) -> str {
+    return frame_value_at(wire, position)
+}
+
+fn wire_i32(wire: str, position: i32) -> i32 {
+    return model.artifacts.parse_i32(frame_value_at(wire, position))
+}
+
+fn attention_report(policy_name: str, prompt_tokens: i32, decode_tokens: i32, used_pages: i32, target_token: i32, target_layer: i32, attn_sum_x1000: i32, output_sum_x1000: i32, top_page: i32, top_score_x1000: i32, effective_bytes_read: i32, old_pages_streamed: i32, raw_pages_streamed: i32, parity_match: i32) -> AttentionReport {
+    return AttentionReport {
+        policy_name: policy_name,
+        prompt_tokens: prompt_tokens,
+        decode_tokens: decode_tokens,
+        used_pages: used_pages,
+        target_token: target_token,
+        target_layer: target_layer,
+        attn_sum_x1000: attn_sum_x1000,
+        output_sum_x1000: output_sum_x1000,
+        top_page: top_page,
+        top_score_x1000: top_score_x1000,
+        effective_bytes_read: effective_bytes_read,
+        old_pages_streamed: old_pages_streamed,
+        raw_pages_streamed: raw_pages_streamed,
+        parity_match: parity_match,
+    }
+}
+
+fn attention_report_from_wire(wire: str) -> AttentionReport {
+    return AttentionReport {
+        policy_name: wire_str(wire, 0),
+        prompt_tokens: wire_i32(wire, 1),
+        decode_tokens: wire_i32(wire, 2),
+        used_pages: wire_i32(wire, 3),
+        target_token: wire_i32(wire, 4),
+        target_layer: wire_i32(wire, 5),
+        attn_sum_x1000: wire_i32(wire, 6),
+        output_sum_x1000: wire_i32(wire, 7),
+        top_page: wire_i32(wire, 8),
+        top_score_x1000: wire_i32(wire, 9),
+        effective_bytes_read: wire_i32(wire, 10),
+        old_pages_streamed: wire_i32(wire, 11),
+        raw_pages_streamed: wire_i32(wire, 12),
+        parity_match: wire_i32(wire, 13),
+    }
+}
+
+fn attention_report_json(policy_name: str, prompt_tokens: i32, decode_tokens: i32, used_pages: i32, target_token: i32, target_layer: i32, attn_sum_x1000: i32, output_sum_x1000: i32, top_page: i32, top_score_x1000: i32, effective_bytes_read: i32, old_pages_streamed: i32, raw_pages_streamed: i32, parity_match: i32) -> str {
+    let payload = map.new()
+    discard map.set(payload, "policy", json.str(policy_name))
+    discard map.set(payload, "prompt_tokens", model.json_emit.i32(prompt_tokens))
+    discard map.set(payload, "decode_tokens", model.json_emit.i32(decode_tokens))
+    discard map.set(payload, "used_pages", model.json_emit.i32(used_pages))
+    discard map.set(payload, "target_token", model.json_emit.i32(target_token))
+    discard map.set(payload, "target_layer", model.json_emit.i32(target_layer))
+    discard map.set(payload, "attn_sum_x1000", model.json_emit.i32(attn_sum_x1000))
+    discard map.set(payload, "output_sum_x1000", model.json_emit.i32(output_sum_x1000))
+    discard map.set(payload, "top_page", model.json_emit.i32(top_page))
+    discard map.set(payload, "top_score_x1000", model.json_emit.i32(top_score_x1000))
+    discard map.set(payload, "effective_bytes_read", model.json_emit.i32(effective_bytes_read))
+    discard map.set(payload, "old_pages_streamed", model.json_emit.i32(old_pages_streamed))
+    discard map.set(payload, "raw_pages_streamed", model.json_emit.i32(raw_pages_streamed))
+    discard map.set(payload, "parity_match", model.json_emit.i32(parity_match))
+    return json.object(payload)
+}
+
+fn choose_target_token(state: runtime.session.SessionState) -> i32 {
+    if state.total_tokens <= 0 {
+        return 0
+    }
+    return state.total_tokens - 1
+}
+fn target_token_id(state: runtime.session.SessionState, prompt_token_ids_wire: str, decode_token_ids_wire: str) -> i32 {
+    return runtime.session.token_id_at_parts(state, prompt_token_ids_wire, decode_token_ids_wire, choose_target_token(state))
+}
+
+fn choose_target_layer(shape: model.EngineShape) -> i32 {
+    if shape.layer_count <= 1 {
+        return 0
+    }
+    return shape.layer_count - 1
+}
+
+fn scalar_seed(layer_id: i32, token_id: i32, head_lane: i32) -> i32 {
+    return (layer_id * 97) + (token_id * 31) + (head_lane * 11) + 17
+}
+
+fn raw_query_value(layer_id: i32, token_id: i32, head_lane: i32) -> i32 {
+    let seed = scalar_seed(layer_id, token_id, head_lane)
+    return ((seed % 29) - 14) * 9
+}
+
+fn raw_key_value(layer_id: i32, token_id: i32, head_lane: i32) -> i32 {
+    let seed = scalar_seed(layer_id + 3, token_id + 5, head_lane + 7)
+    return ((seed % 23) - 11) * 10
+}
+
+fn raw_value_value(layer_id: i32, token_id: i32, head_lane: i32) -> i32 {
+    let seed = scalar_seed(layer_id + 13, token_id + 19, head_lane + 23)
+    return ((seed % 19) - 9) * 12
+}
+
+fn quantize_int8_scalar(raw_value: i32) -> i32 {
+    return (raw_value / 8) * 8
+}
+
+fn quantize_int4_scalar(raw_value: i32) -> i32 {
+    return (raw_value / 16) * 16
+}
+
+fn effective_key(entry: kv.kv_page.KVPage, layer_id: i32, token_id: i32, head_lane: i32) -> i32 {
+    let raw_value = raw_key_value(layer_id, token_id, head_lane)
+    if entry.k_precision == kv.kv_page.Precision::Raw {
+        return raw_value
+    }
+    if entry.k_precision == kv.kv_page.Precision::Int8 {
+        return quantize_int8_scalar(raw_value)
+    }
+    if entry.k_precision == kv.kv_page.Precision::Int4 {
+        return quantize_int4_scalar(raw_value)
+    }
+    return 0
+}
+
+fn effective_value(entry: kv.kv_page.KVPage, layer_id: i32, token_id: i32, head_lane: i32) -> i32 {
+    let raw_value = raw_value_value(layer_id, token_id, head_lane)
+    if entry.v_precision == kv.kv_page.Precision::Raw {
+        return raw_value
+    }
+    if entry.v_precision == kv.kv_page.Precision::Int8 {
+        return quantize_int8_scalar(raw_value)
+    }
+    if entry.v_precision == kv.kv_page.Precision::Int4 {
+        return quantize_int4_scalar(raw_value)
+    }
+    return 0
+}
+
+fn token_score(entry: kv.kv_page.KVPage, layer_id: i32, query_token_id: i32, key_token_id: i32, head_dim: i32) -> i32 {
+    if entry.k_precision == kv.kv_page.Precision::Dropped {
+        return -100000000
+    }
+    let mut lane = 0
+    let mut dot = 0
+    while lane < head_dim {
+        dot = dot + (raw_query_value(layer_id, query_token_id, lane) * effective_key(entry, layer_id, key_token_id, lane))
+        lane = lane + 1
+    }
+    let recency_bonus = if entry.is_hot == 1 { 25 } else { 0 }
+    return (dot / 100) + recency_bonus
+}
+
+fn page_from_block(layer_id: i32, page_id: i32, block: kv.physical_block_pool.PhysicalKVBlock) -> kv.kv_page.KVPage {
+    return kv.kv_page.explicit_page(
+        layer_id,
+        page_id,
+        block.start_token,
+        block.token_count,
+        kv.physical_block_pool.k_precision_of(block),
+        kv.physical_block_pool.v_precision_of(block),
+        kv.physical_block_pool.role_of(block),
+        block.is_hot
+    )
+}
+fn page_score(state: runtime.session.SessionState, prompt_token_ids_wire: str, decode_token_ids_wire: str, entry: kv.kv_page.KVPage, layer_id: i32, query_position: i32, page_token_start: i32, token_count: i32, head_dim: i32) -> i32 {
+    let mut best = -100000000
+    let query_token_id = target_token_id(state, prompt_token_ids_wire, decode_token_ids_wire)
+    let mut offset = 0
+    while offset < token_count {
+        let token_position = page_token_start + offset
+        if token_position <= query_position {
+            let key_token_id = runtime.session.token_id_at_parts(state, prompt_token_ids_wire, decode_token_ids_wire, token_position) let score = token_score(entry, layer_id, query_token_id, key_token_id, head_dim)
+            if score > best {
+                best = score
+            }
+        }
+        offset = offset + 1
+    }
+    return best
+}
+fn page_output_component(state: runtime.session.SessionState, prompt_token_ids_wire: str, decode_token_ids_wire: str, entry: kv.kv_page.KVPage, layer_id: i32, query_position: i32, page_token_start: i32, token_count: i32, head_dim: i32) -> i32 {
+    let score = page_score(state, prompt_token_ids_wire, decode_token_ids_wire, entry, layer_id, query_position, page_token_start, token_count, head_dim)
+    if score < -99999999 {
+        return 0
+    }
+    let query_token_id = target_token_id(state, prompt_token_ids_wire, decode_token_ids_wire) let mut best_token_position = page_token_start let mut best_token_id = runtime.session.token_id_at_parts(state, prompt_token_ids_wire, decode_token_ids_wire, page_token_start)
+    let mut best = -100000000
+    let mut offset = 0
+    while offset < token_count {
+        let token_position = page_token_start + offset
+        if token_position <= query_position {
+            let key_token_id = runtime.session.token_id_at_parts(state, prompt_token_ids_wire, decode_token_ids_wire, token_position) let token_score_value = token_score(entry, layer_id, query_token_id, key_token_id, head_dim)
+            if token_score_value > best {
+                best = token_score_value
+                best_token_position = token_position best_token_id = key_token_id
+            }
+        }
+        offset = offset + 1
+    }
+    let mut lane = 0
+    let mut total = 0
+    while lane < head_dim {
+        total = total + effective_value(entry, layer_id, best_token_id, lane) + (best_token_position % 3)
+        lane = lane + 1
+    }
+    return total
+}
+fn precision_bias(precision: kv.kv_page.Precision) -> i32 {
+    if precision == kv.kv_page.Precision::Raw {
+        return 23
+    }
+    if precision == kv.kv_page.Precision::Int8 {
+        return 11
+    }
+    if precision == kv.kv_page.Precision::Int4 {
+        return 5
+    }
+    return -17
+}
+
+fn max_i32(lhs: i32, rhs: i32) -> i32 {
+    if lhs > rhs {
+        return lhs
+    }
+    return rhs
+}
+
+fn report(shape: model.EngineShape, cfg: runtime.session.SessionConfig, state: runtime.session.SessionState, prompt_token_ids_wire: str, decode_token_ids_wire: str) -> AttentionReport {
+    return attention_report_from_wire(report_wire_for(shape, cfg, state, prompt_token_ids_wire, decode_token_ids_wire))
+}
+
+fn report_wire_for(shape: model.EngineShape, cfg: runtime.session.SessionConfig, state: runtime.session.SessionState, prompt_token_ids_wire: str, decode_token_ids_wire: str) -> str {
+    return report_wire_for_with_manager(shape, cfg, state, prompt_token_ids_wire, decode_token_ids_wire, runtime.session.manager_of(shape, cfg.policy_name, state))
+}
+
+fn report_wire_for_with_manager(shape: model.EngineShape, cfg: runtime.session.SessionConfig, state: runtime.session.SessionState, prompt_token_ids_wire: str, decode_token_ids_wire: str, manager: runtime.block_manager.ManagedSession) -> str {
+    if cfg.policy_name == "full_kv" || cfg.policy_name == "paged_full_kv" {
+        return attention.full_attention.report_wire_with_manager(shape, cfg, state, prompt_token_ids_wire, decode_token_ids_wire, manager)
+    }
+    if cfg.policy_name == "recent_only" {
+        return attention.recent_only_attention.report_wire_with_manager(shape, cfg, state, prompt_token_ids_wire, decode_token_ids_wire, manager)
+    }
+    return attention.fidelity_attention.report_wire_with_manager(shape, cfg, state, prompt_token_ids_wire, decode_token_ids_wire, manager)
+}
+
+fn parity_report(shape: model.EngineShape, state: runtime.session.SessionState, prompt_token_ids_wire: str, decode_token_ids_wire: str) -> i32 {
+    let full_cfg = runtime.session.config("parity", shape.page_tokens, 100, state.prompt_tokens, state.decode_tokens, "full_kv")
+    let paged_cfg = runtime.session.config("parity", shape.page_tokens, 100, state.prompt_tokens, state.decode_tokens, "paged_full_kv")
+    let full_report = attention.full_attention.report(shape, full_cfg, state, prompt_token_ids_wire, decode_token_ids_wire)
+    let paged_report = attention.full_attention.report(shape, paged_cfg, state, prompt_token_ids_wire, decode_token_ids_wire)
+    if full_report.attn_sum_x1000 == paged_report.attn_sum_x1000 {
+        if full_report.output_sum_x1000 == paged_report.output_sum_x1000 {
+            if full_report.top_page == paged_report.top_page {
+                return 1
+            }
+        }
+    }
+    return 0
+}
+
+fn with_parity(shape: model.EngineShape, cfg: runtime.session.SessionConfig, state: runtime.session.SessionState, prompt_token_ids_wire: str, decode_token_ids_wire: str) -> AttentionReport {
+    let base = report(shape, cfg, state, prompt_token_ids_wire, decode_token_ids_wire)
+    return attention_report(base.policy_name, base.prompt_tokens, base.decode_tokens, base.used_pages, base.target_token, base.target_layer, base.attn_sum_x1000, base.output_sum_x1000, base.top_page, base.top_score_x1000, base.effective_bytes_read, base.old_pages_streamed, base.raw_pages_streamed, parity_report(shape, state, prompt_token_ids_wire, decode_token_ids_wire))
+}
+
+fn report_json(report: AttentionReport) -> str {
+    let payload = map.new()
+    discard map.set(payload, "policy", json.str(report.policy_name))
+    discard map.set(payload, "prompt_tokens", model.json_emit.i32(report.prompt_tokens))
+    discard map.set(payload, "decode_tokens", model.json_emit.i32(report.decode_tokens))
+    discard map.set(payload, "used_pages", model.json_emit.i32(report.used_pages))
+    discard map.set(payload, "target_token", model.json_emit.i32(report.target_token))
+    discard map.set(payload, "target_layer", model.json_emit.i32(report.target_layer))
+    discard map.set(payload, "attn_sum_x1000", model.json_emit.i32(report.attn_sum_x1000))
+    discard map.set(payload, "output_sum_x1000", model.json_emit.i32(report.output_sum_x1000))
+    discard map.set(payload, "top_page", model.json_emit.i32(report.top_page))
+    discard map.set(payload, "top_score_x1000", model.json_emit.i32(report.top_score_x1000))
+    discard map.set(payload, "effective_bytes_read", model.json_emit.i32(report.effective_bytes_read))
+    discard map.set(payload, "old_pages_streamed", model.json_emit.i32(report.old_pages_streamed))
+    discard map.set(payload, "raw_pages_streamed", model.json_emit.i32(report.raw_pages_streamed))
+    discard map.set(payload, "parity_match", model.json_emit.i32(report.parity_match))
+    return json.object(payload)
+}

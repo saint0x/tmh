@@ -1,0 +1,14 @@
+use core.io;
+use core.thread;
+mod attention;
+mod bench;
+mod kv;
+mod model;
+mod runtime;
+mod tests;
+host fn main() -> i32 {
+    let rc = runtime.boot() if rc != 0 {
+        return rc
+    }
+    return runtime.inspect_and_report()
+}

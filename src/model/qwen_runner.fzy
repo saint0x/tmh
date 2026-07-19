@@ -1,0 +1,55 @@
+use attention;
+use model;
+use runtime;
+struct PrefillState {
+    prompt_text: str, prompt_token_ids_wire: str, prompt_token_count: i32, prompt_checksum: i32, activation_seed: i32, route_seed: i32,
+}
+struct StepLogits {
+    top_token_id: i32, top_score_x1000: i32, alt_token_id: i32, alt_score_x1000: i32, logits_checksum: i32,
+}
+fn step_logits_record(top_token_id: i32, top_score_x1000: i32, alt_token_id: i32, alt_score_x1000: i32, logits_checksum: i32) -> StepLogits {
+    return StepLogits {
+        top_token_id: top_token_id, top_score_x1000: top_score_x1000, alt_token_id: alt_token_id, alt_score_x1000: alt_score_x1000, logits_checksum: logits_checksum,
+    }
+}
+fn prompt_checksum(prompt: model.tokenizer_bridge.TokenizedText) -> i32 {
+    return prompt.checksum + (prompt.token_count * 37)
+}
+fn activation_seed(loaded: model.model_loader.LoadedModel, prompt_sum: i32) -> i32 {
+    return loaded.artifact_fingerprint + prompt_sum + (loaded.layer_count * 97) + (loaded.head_dim * 11)
+}
+fn route_seed(loaded: model.model_loader.LoadedModel, prompt_token_count: i32) -> i32 {
+    return loaded.config_checksum + (prompt_token_count * 53) + loaded.weights_bytes
+}
+fn prefill(loaded: model.model_loader.LoadedModel, prompt: model.tokenizer_bridge.TokenizedText) -> PrefillState {
+    let prompt_sum = prompt_checksum(prompt) let act_seed = activation_seed(loaded, prompt_sum) let route = route_seed(loaded, prompt.token_count) return PrefillState {
+        prompt_text: prompt.raw_text, prompt_token_ids_wire: prompt.token_ids_wire, prompt_token_count: prompt.token_count, prompt_checksum: prompt_sum, activation_seed: act_seed, route_seed: route,
+    }
+}
+fn family_bias(family: str) -> i32 {
+    if family == "qwen" {
+        return 211
+    }
+    if family == "llama" {
+        return 157
+    }
+    return 43
+}
+fn positive(value: i32) -> i32 {
+    if value < 0 {
+        return 0 - value
+    }
+    return value
+}
+fn candidate_score(loaded: model.model_loader.LoadedModel, prefill: PrefillState, session_state: runtime.session.SessionState, attention: attention.AttentionReport, step_index: i32, candidate_lane: i32) -> i32 {
+    let route = prefill.route_seed + attention.attn_sum_x1000 + (attention.output_sum_x1000 / 5) + (candidate_lane * 131) let layout = (session_state.used_pages * 19) + (session_state.hot_pages * 29) + (session_state.tail_page_tokens * 7) let family = family_bias(loaded.family) return positive(route + layout + family + prefill.activation_seed + (step_index * 61))
+}
+fn step_logits(loaded: model.model_loader.LoadedModel, prefill: PrefillState, generation_cfg: runtime.generation_config.GenerationConfig, session_state: runtime.session.SessionState, policy_name: str, prompt_token_ids_wire: str, decode_token_ids_wire: str, attention: attention.AttentionReport, step_index: i32) -> StepLogits {
+    let _attention = attention let _candidate_lane = candidate_score(loaded, prefill, session_state, attention, step_index, 0) return model.forward_pass.top_logits(loaded, prefill, session_state, policy_name, prompt_token_ids_wire, decode_token_ids_wire, step_index, runtime.generation_config.safe_vocab_size(generation_cfg.vocab_size))
+}
+fn top_token_id(loaded: model.model_loader.LoadedModel, prompt_sum: i32, act_seed: i32, step_index: i32, session_state: runtime.session.SessionState, policy_name: str, prompt_token_ids_wire: str, decode_token_ids_wire: str, vocab_size: i32) -> i32 {
+    return model.forward_pass.top_token_id(loaded, prompt_sum, act_seed, session_state, policy_name, prompt_token_ids_wire, decode_token_ids_wire, step_index, vocab_size)
+}
+fn top_token_id_with_manager(loaded: model.model_loader.LoadedModel, prompt_sum: i32, act_seed: i32, step_index: i32, session_state: runtime.session.SessionState, prompt_token_ids_wire: str, decode_token_ids_wire: str, manager: runtime.block_manager.ManagedSession, vocab_size: i32) -> i32 {
+    return model.forward_pass.top_token_id_with_manager(loaded, prompt_sum, act_seed, session_state, prompt_token_ids_wire, decode_token_ids_wire, manager, step_index, vocab_size)
+}

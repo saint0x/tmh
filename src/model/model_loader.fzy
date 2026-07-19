@@ -1,0 +1,74 @@
+use core.env;
+use core.io;
+use model;
+struct LoadedModel {
+    model_dir: str, shape: model.EngineShape, archive: model.safetensors_loader.TensorArchive, model_id: str, family: str, architecture: str, vocab_size: i32, layer_count: i32, head_count: i32, head_dim: i32, context_tokens: i32, page_tokens: i32, tokenizer_bytes: i32, weights_bytes: i32, config_checksum: i32, artifact_fingerprint: i32,
+}
+fn checksum_text(text: str) -> i32 {
+    let mut idx = 0 let mut checksum = 0 while idx < str.len(text) {
+        checksum = checksum + (idx + 1) * str.len(str.slice(text, idx, idx + 1)) idx = idx + 1
+    }
+    return checksum
+}
+fn trace_loader(label: str) {
+    if env.get("FPA_TRACE_RUNTIME") == "1" {
+        discard term.write(str.concat(str.concat("FPA_TRACE_LOADER ", label), "\n"))
+    }
+}
+fn detect_architecture(config_raw: str, mesh_raw: str) -> str {
+    let arch = model.artifacts.json_str(config_raw, "model_type", "") if arch != "" {
+        return arch
+    }
+    let mesh_arch = model.artifacts.json_str(mesh_raw, "architecture", "") if mesh_arch != "" {
+        return mesh_arch
+    }
+    return "unknown"
+}
+fn family_from_architecture(architecture: str) -> str {
+    if str.contains(architecture, "qwen") == 1 {
+        return "qwen"
+    }
+    if str.contains(architecture, "llama") == 1 {
+        return "llama"
+    }
+    return "generic_decoder"
+}
+fn artifact_fingerprint(model_dir: str, config_path: str, tokenizer_path: str, weights_path: str, config_raw: str) -> i32 {
+    let config_size = io.stat_size(config_path) let tokenizer_size = io.stat_size(tokenizer_path) let weights_size = io.stat_size(weights_path) let config_mtime = io.stat_mtime(config_path) let tokenizer_mtime = io.stat_mtime(tokenizer_path) let weights_mtime = io.stat_mtime(weights_path) return checksum_text(model_dir) + checksum_text(config_raw) + config_size + tokenizer_size + weights_size + config_mtime + tokenizer_mtime + weights_mtime
+}
+fn load(model_dir: str, page_tokens: i32) -> LoadedModel {
+    let config_path = model.artifacts.hf_config_path(model_dir) let mesh_path = model.artifacts.mesh_config_path(model_dir) let tokenizer_path = model.artifacts.tokenizer_path(model_dir) let weights_format = model.artifacts.infer_weight_format(model_dir) let weights_path = if weights_format == "safetensors" {
+        model.artifacts.safetensors_path(model_dir)
+    } else {
+        model.artifacts.pytorch_path(model_dir)
+    }
+    let config_raw = if io.exists(config_path) == 1 {
+        io.read_text(config_path)
+    } else {
+        ""
+    }
+    let mesh_raw = if io.exists(mesh_path) == 1 {
+        io.read_text(mesh_path)
+    } else {
+        ""
+    }
+    let shape = model.artifacts.resolve_shape(model_dir, page_tokens) let arch = detect_architecture(config_raw, mesh_raw) let family = family_from_architecture(arch) let archive = model.safetensors_loader.load(model_dir, shape) trace_loader("archive_loaded")
+    return LoadedModel {
+        model_dir: model_dir, shape: shape, archive: archive, model_id: model.artifacts.model_id_from_dir(model_dir), family: family, architecture: arch, vocab_size: max_i32(1, model.artifacts.json_i32(config_raw, "vocab_size", 0)), layer_count: shape.layer_count, head_count: shape.head_count, head_dim: shape.head_dim, context_tokens: shape.context_tokens, page_tokens: shape.page_tokens, tokenizer_bytes: io.stat_size(tokenizer_path), weights_bytes: io.stat_size(weights_path), config_checksum: checksum_text(config_raw), artifact_fingerprint: artifact_fingerprint(model_dir, config_path, tokenizer_path, weights_path, config_raw),
+    }
+}
+fn max_i32(lhs: i32, rhs: i32) -> i32 {
+    if lhs > rhs {
+        return lhs
+    }
+    return rhs
+}
+fn positive_mod(value: i32, modulo: i32) -> i32 {
+    if modulo <= 0 {
+        return 0
+    }
+    let raw = value% modulo if raw < 0 {
+        return raw + modulo
+    }
+    return raw
+}
