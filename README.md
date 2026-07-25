@@ -60,6 +60,8 @@ TMHSTORY.md           short project history
 
 ## Quickstart
 
+Install the Fzy compiler from [saint0x/fzy](https://github.com/saint0x/fzy) if you want to build or extend the standalone Fzy POC sources directly. The commands below validate the checked-in TMH contract and artifacts.
+
 Run the core deterministic layout validator:
 
 ```bash
@@ -80,7 +82,7 @@ fozzy replay artifacts/fozzy/tmh_paper_claim_stress.trace.fozzy --json
 fozzy ci artifacts/fozzy/tmh_paper_claim_stress.trace.fozzy --json
 ```
 
-The Fzy source is intentionally kept as a compact POC model. In this repository it is validated through the Fozzy scenarios and Python artifact validators above rather than through a separate public Fzy compiler command.
+The Fzy source is intentionally kept as a compact POC model. In this repository it is validated through the Fozzy scenarios and Python artifact validators above; use the public [Fzy compiler](https://github.com/saint0x/fzy) for direct compiler work.
 
 ## Boundary
 
