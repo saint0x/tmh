@@ -1,6 +1,6 @@
 # TMH Architecture
 
-TMH means Transformer Memory Hierarchy.
+TMH means Tiered Memory Hierarchy.
 
 The architecture starts from one observation: KV cache pages are not uniform. A recent decode tail page, the first prompt page, and an old early-layer page have different latency, reuse, and fidelity requirements. A flat KV cache hides those differences until the runtime runs out of memory.
 

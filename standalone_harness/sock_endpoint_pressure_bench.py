@@ -115,11 +115,11 @@ def build_pressure_suite(profile: str) -> list[PressureCase]:
         ),
         PressureCase(
             "long_generation_systems", "long_generation",
-            "Write a production engineering analysis of transformer memory hierarchy under ROCm serving pressure. "
+            "Write a production engineering analysis of tiered memory hierarchy under ROCm serving pressure. "
             "Discuss prompt prefill, KV residency, hot/warm/cold tiers, quantized old KV, fidelity-aware demotion, "
             "prefix reuse, batching, TTFT, decode throughput, and what evidence would falsify the thesis. "
             + filler_passage("systems", "systems", short_repeat, 1),
-            "transformer memory hierarchy", 384, 0.2,
+            "tiered memory hierarchy", 384, 0.2,
         ),
     ]
 

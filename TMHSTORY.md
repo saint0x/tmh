@@ -1,6 +1,6 @@
 # TMH Story
 
-TMH started as a question about KV compression and became a runtime memory hierarchy.
+TMH started as a question about KV compression and became a runtime tiered memory hierarchy.
 
 ## The Original Lamp
 
@@ -10,7 +10,7 @@ That changed the frame:
 
 ```text
 wrong frame: can we throw away old KV?
-better frame: how should transformer memory be tiered?
+better frame: how should inference memory be tiered?
 ```
 
 ## The Research POC

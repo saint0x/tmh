@@ -1,6 +1,6 @@
 # TMH
 
-Transformer Memory Hierarchy (TMH) is a research implementation of a pressure-aware KV cache layout for transformer inference.
+Tiered Memory Hierarchy (TMH) is a research implementation of a pressure-aware KV cache layout for transformer inference.
 
 The core idea is simple: KV cache pages do not all have the same runtime value. Prompt anchors, recent decode tail pages, older early-layer pages, and older late-layer pages should not be forced into one uniform representation. TMH makes those roles explicit so a runtime can choose residency and fidelity before memory pressure turns into eviction or failed admission.
 
