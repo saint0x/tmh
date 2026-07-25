@@ -6,7 +6,7 @@
       "type": "proc_when",
       "cmd": "/usr/bin/python3",
       "args": [
-        "/home/deepsaint/work/kv-tiered/tmh/standalone_harness/validate_tmh_30b_layout_sweep.py",
+        "standalone_harness/validate_tmh_30b_layout_sweep.py",
         "artifacts/tmh_30b_maxfit_preflight_layout_sweep/20260719-040423"
       ],
       "exit_code": 0,
@@ -18,7 +18,7 @@
       "type": "proc_spawn",
       "cmd": "/usr/bin/python3",
       "args": [
-        "/home/deepsaint/work/kv-tiered/tmh/standalone_harness/validate_tmh_30b_layout_sweep.py",
+        "standalone_harness/validate_tmh_30b_layout_sweep.py",
         "artifacts/tmh_30b_maxfit_preflight_layout_sweep/20260719-040423"
       ],
       "expect_exit": 0,

@@ -1,145 +1,91 @@
 # TMH
 
-Transformer Memory Hierarchy (`tmh`) is a research and systems project for making transformer KV memory explicit, page-native, and pressure-aware.
+Transformer Memory Hierarchy (TMH) is a research implementation of a pressure-aware KV cache layout for transformer inference.
 
-The core claim is simple: transformer inference should not treat all KV state as uniform. Old context, prompt anchors, active decode tail, layer position, and memory-pressure state carry different runtime meaning. TMH turns that into a compiled memory layout that a runtime can execute rather than leaving the cache manager to infer policy after memory has already been allocated.
+The core idea is simple: KV cache pages do not all have the same runtime value. Prompt anchors, recent decode tail pages, older early-layer pages, and older late-layer pages should not be forced into one uniform representation. TMH makes those roles explicit so a runtime can choose residency and fidelity before memory pressure turns into eviction or failed admission.
 
-## What This Repo Contains
+This repository is the standalone research and Fozzy-validation POC. The production integration lives in SOCK:
 
-- A compact TMH/FPA implementation in `src/main.fzy`.
-- A standalone benchmark harness in `standalone_harness/`.
-- Deterministic Fozzy scenarios for reproducible validation.
-- Curated 30B benchmark artifacts under `artifacts/`.
-- Research documentation in `TMH.md`, `SPEC.md`, `RESULTS.md`, `FINDINGS.md`, `RESEARCH_BASELINE.md`, and `PAPER_DRAFT_SUPPORT.md`.
+- Production runtime: [ariacomputecompany/sock](https://github.com/ariacomputecompany/sock)
+- Production layout flag: `--kv-layout tmh`
+- Current production model path: vLLM physical TMH KV on ROCm for `Qwen/Qwen3-30B-A3B-GPTQ-Int4`
 
-## Current Evidence
+## Current TMH Contract
 
-The strongest current result is a 30B served-model validation path using:
+The current implementation models four physical KV roles:
 
-- Model: `Qwen/Qwen3-30B-A3B-GPTQ-Int4`
-- Serving path: `sock` CLI over vendored vLLM on ROCm
-- Endpoint shape: OpenAI-compatible chat completions
-- Context length: `2048`
-- TMH layout: `tmh_fidelity_paged_kv`
+| Role | Storage intent |
+| --- | --- |
+| `PINNED_RAW` | first/page-anchor KV, kept raw |
+| `HOT_RAW` | recent active tail KV, kept raw |
+| `WARM_INT8_INT4` | older early-layer KV, int8 K plus int4 V |
+| `WARM_INT8_INT8` | older late-layer KV, int8 K plus int8 V |
 
-The July 19, 2026 endpoint pressure run exercised:
+The standalone Fzy code and Python harnesses validate this layout contract. SOCK contains the real vLLM implementation: physical raw and warm pools, descriptor application, raw/warm cache writers, mixed attention kernels, prefix-cache-aware storage, and raw-pressure fallback behavior.
 
-- `3` measured runs per prompt case
-- `1` warmup run per case
-- concurrency levels `1`, `2`, and `4`
-- `10` streaming probes
-- `796.1613s` elapsed wall time
+## Proven Results
 
-Observed throughput:
+The strongest current production result is no longer the early POC memory-only claim. SOCK now has a real physical TMH path that is throughput-positive at the validated operating point:
 
-| Concurrency | Throughput range |
-| ---: | ---: |
-| `1` | `28.875-30.186 tok/s` |
-| `2` | `35.588-37.123 tok/s` |
-| `4` | `69.126-71.287 tok/s` |
+| Benchmark | Result |
+| --- | ---: |
+| TMH c4 vs standard c4 | `+15.86%` total tok/s |
+| TMH c12 vs standard c12 | `+2.08%` total tok/s |
+| TMH logical KV capacity at util0.35 | `+73.51%` vs standard |
+| c14 frontier after fallback | succeeds `14/14` instead of engine-dead |
 
-Streaming time to first token held at roughly `0.106-0.180s`.
+The standalone repo still preserves the older reproducible layout evidence:
 
-The corresponding layout sweeps covered:
+| Validation | Result |
+| --- | ---: |
+| Qwen-30B old/warm KV pressure reduction | `16.667%` |
+| model-family old/warm KV pressure floor | `16.071%` |
+| paper-claim stress rows | `732,000` |
+| adversarial checked layer-pages | `356,890,836` |
 
-- page sizes `8`, `16`, `32`, and `64`
-- hot budgets `75`, `50`, `25`, `12.5`, `6.25`, `3.125`, and `0`
-- `280` measured rows per sweep
-- `1080` compiled plan ranges per sweep
-- `100%` plan validation
+Read [RESULTS.md](RESULTS.md) for the full evidence boundary.
 
-The old/warm KV pressure reduction versus same-hot uniform-int8 old KV held at `16.667%` across the sweep. Total effective KV reduction at `0%` hot was:
+## Repository Layout
 
-| Page tokens | Total effective reduction |
-| ---: | ---: |
-| `8` | `16.381%` |
-| `16` | `16.100%` |
-| `32` | `15.553%` |
-| `64` | `14.515%` |
-
-This supports the TMH thesis under real served-model pressure, while keeping the boundary honest: the current 30B evidence proves compiled layout-pressure accounting against live sock/vendored-vLLM traffic. The next milestone is wiring TMH-managed KV internals into the live runtime and rerunning the same endpoint pressure suite.
-
-The adversarial layout stress suite expands the geometry beyond the served 30B corpus:
-
-- `16,632` synthetic shape/page/budget/sequence rows
-- `9,255` rows with old KV present
-- page sizes from `1` to `512`
-- hot budgets from `100` down to `0`
-- five model shapes, including Qwen-30B GQA, dense/GQA boundaries, fp32 MHA, a 70B-style shape, and a one-layer all-late boundary shape
-- `356,890,836` checked layer-pages
-- `100%` plan validation and `100%` invariant pass rate
-
-The hierarchy thesis held across that matrix: no cold or dropped KV, no negative total-reduction rows where old KV exists, prompt anchors stayed pinned raw, recent tails stayed raw/hot, and old pages demoted rather than evicting. The exact `16.667%` old/warm reduction remains correctly scoped to the Qwen-30B production shape.
-
-The model-family memory baseline now measures the same production TMH planner across every locally cached Hugging Face model config:
-
-- `15` model configs
-- `31` endpoint-derived plus synthetic pressure cases
-- `18,600` model/page/budget/pressure rows
-- `14,145` rows with old KV present
-- `100%` plan validation and `100%` invariant pass rate
-- conservative supported-model old/warm KV pressure floor: `16.071%`
-- promoted public number: `at least 16.0% old/warm KV memory-pressure reduction across the tested production model-family baseline`
-
-This replaces the Qwen-30B-only `16.667%` number as the production-wide claim. The Qwen-30B number remains true for that model shape, but the model-family floor is the number to promote.
-
-The pre-paper claim stress suite then expands that baseline to `40` deterministic traffic runs:
-
-- `15` actual cached model configs
-- `31` base pressure cases perturbed across `40` deterministic runs
-- `732,000` evaluated model/page/budget/case rows
-- `682,050` rows with old KV present
-- `100%` invariant pass rate
-- conservative old/warm KV pressure floor: `16.071%`
-- promoted public number remains: `at least 16.0% old/warm KV memory-pressure reduction across the tested production model-family stress baseline`
-
-This is strong enough to use as the paper/product memory-pressure claim. It is still not a claim that TMH has already been wired into live vLLM KV internals for end-to-end runtime speedup.
+```text
+src/                  Fzy POC for page roles, planning, runtime accounting, and smoke execution
+standalone_harness/   Python validators and Fozzy scenarios
+artifacts/            frozen reports, JSON outputs, and recorded Fozzy traces
+TMH.md                architecture and implementation map
+SPEC.md               standalone contract and invariants
+RESULTS.md            current production plus POC evidence
+OPTIMIZATIONS.md      concise SOCK optimization ledger
+TMHSTORY.md           short project history
+```
 
 ## Quickstart
 
-Run the deterministic TMH smoke scenario:
+Run the core deterministic layout validator:
 
 ```bash
-fozzy --json run standalone_harness/tmh_only_30b_layout.fozzy.json --det --strict-verify --seed 1337
+fozzy --json run standalone_harness/tmh_only_30b_layout.fozzy.json --det --strict --seed 1337
 ```
 
-Run the stronger 30B layout sweep scenario:
+Run the model-family validation:
 
 ```bash
-fozzy --json run standalone_harness/tmh_30b_standard_runs3_layout_sweep.fozzy.json --det --strict-verify --seed 1337
+fozzy --json run standalone_harness/tmh_model_family_memory_baseline.fozzy.json --det --strict --seed 1337 --proc-backend host --fs-backend host
 ```
 
-Verify and replay the recorded stronger trace:
+Verify and replay a recorded trace:
 
 ```bash
-fozzy trace verify artifacts/fozzy/tmh_30b_standard_runs3_layout_sweep.trace.fozzy --strict --json
-fozzy replay artifacts/fozzy/tmh_30b_standard_runs3_layout_sweep.trace.fozzy --json
-fozzy ci artifacts/fozzy/tmh_30b_standard_runs3_layout_sweep.trace.fozzy --json
+fozzy trace verify artifacts/fozzy/tmh_paper_claim_stress.trace.fozzy --strict --json
+fozzy replay artifacts/fozzy/tmh_paper_claim_stress.trace.fozzy --json
+fozzy ci artifacts/fozzy/tmh_paper_claim_stress.trace.fozzy --json
 ```
 
-For harness-specific commands and artifact shapes, see `standalone_harness/README.md`.
+The Fzy source is intentionally kept as a compact POC model. In this repository it is validated through the Fozzy scenarios and Python artifact validators above rather than through a separate public Fzy compiler command.
 
-## Artifact Map
+## Boundary
 
-- `artifacts/sock_endpoint_pressure/20260719-040954/REPORT.md`: strongest live sock endpoint pressure report.
-- `artifacts/tmh_30b_standard_runs3_layout_sweep/20260719-041243/REPORT.md`: strongest endpoint-derived TMH layout sweep.
-- `artifacts/tmh_30b_maxfit_preflight_layout_sweep/20260719-040423/REPORT.md`: max-fit dry-run preflight sweep.
-- `artifacts/tmh_adversarial_layout_stress/robust-stress-v1/REPORT.md`: adversarial geometry/model-shape stress report.
-- `artifacts/tmh_model_family_memory_baseline/model-family-v1/REPORT.md`: cross-model production memory-pressure baseline.
-- `artifacts/tmh_paper_claim_stress/paper-claim-stress-v1/REPORT.md`: 40-run pre-paper production claim stress report.
-- `artifacts/fozzy/tmh_30b_standard_runs3_layout_sweep.trace.fozzy`: deterministic trace for the strongest layout sweep.
-- `artifacts/fozzy/tmh_adversarial_layout_stress.trace.fozzy`: deterministic host-backed trace for the adversarial stress validator.
-- `artifacts/fozzy/tmh_model_family_memory_baseline.trace.fozzy`: deterministic host-backed trace for the model-family baseline validator.
-- `artifacts/fozzy/tmh_paper_claim_stress.trace.fozzy`: deterministic host-backed trace for the paper-claim stress validator.
+This repo should be read as the research POC and reproducible contract suite. It is intentionally not presented as the production serving engine. The production implementation and latest performance work are in [ariacomputecompany/sock](https://github.com/ariacomputecompany/sock).
 
-## Design Principles
+The honest current thesis:
 
-- Page-native first. TMH operates over page ranges rather than treating the KV cache as an opaque blob.
-- Explicit plan before runtime mutation. `TMHMemoryPlan` is the authority that downstream cache management should execute.
-- Mixed fidelity over blind eviction. Old KV should degrade gracefully before it disappears.
-- Benchmark honesty. Docs separate proven layout-pressure evidence from future runtime-internal KV claims.
-- Production ergonomics. Reproducible commands, recorded traces, and artifact-backed reports are part of the project surface.
-
-## Current Limitation
-
-TMH is validated as a standalone layout and pressure-accounting layer against live 30B endpoint traffic. It is not yet the active KV manager inside the live sock/vendored-vLLM runtime. The next production milestone is direct runtime integration followed by the same 30B pressure suite, plus quality/performance deltas against the current sock baseline.
+> TMH is validated as a memory hierarchy abstraction and is now throughput-positive in the production SOCK/vLLM path at the best tested operating point, while c14+ still needs more active-step optimization to turn capacity headroom into a larger throughput win.
