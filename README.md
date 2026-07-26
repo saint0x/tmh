@@ -25,16 +25,19 @@ The standalone Fzy code and Python harnesses validate this layout contract. SOCK
 
 ## Proven Results
 
-The strongest current production result is no longer the early POC memory-only claim. SOCK now has a real physical TMH path that is throughput-positive at the validated operating point:
+SOCK has validated TMH on the production `Qwen/Qwen3-30B-A3B-GPTQ-Int4` path across capacity, live saturation, and physical-runtime bring-up:
 
 | Benchmark | Result |
 | --- | ---: |
-| TMH c4 vs standard c4 | `+15.86%` total tok/s |
-| TMH c12 vs standard c12 | `+2.08%` total tok/s |
-| TMH logical KV capacity at util0.35 | `+73.51%` vs standard |
-| c14 frontier after fallback | succeeds `14/14` instead of engine-dead |
+| KV token capacity at util0.35, 8k context | `123,312` TMH vs `70,944` standard (`+73.82%`) |
+| Max concurrency at util0.35, 8k context | `15.05` TMH vs `8.66` standard (`+73.79%`) |
+| Max concurrency at util0.35, 16k context | `7.53` TMH vs `4.33` standard (`+73.90%`) |
+| c14 live frontier with overlay fallback | completes `14/14` requests |
+| All-raw live saturation control at c12 | `1002.77` total tok/s (`-2.07%` vs standard) |
+| Adaptive-raw live saturation at c12, hot25 | `168.31` total tok/s while preserving `+73.51%` capacity |
+| Best current physical TMH runtime | `29.10` geomean completion tok/s, `39.72` geomean total tok/s |
 
-The standalone repo still preserves the older reproducible layout evidence:
+This standalone repo preserves the contract and reproducible validation boundary behind those production runs:
 
 | Validation | Result |
 | --- | ---: |
@@ -90,4 +93,4 @@ This repo should be read as the research POC and reproducible contract suite. It
 
 The honest current thesis:
 
-> TMH is validated as a memory hierarchy abstraction and is now throughput-positive in the production SOCK/vLLM path at the best tested operating point, while c14+ still needs more active-step optimization to turn capacity headroom into a larger throughput win.
+> TMH is validated as a memory hierarchy abstraction. In SOCK, it materially expands KV capacity, keeps all-raw live serving near standard throughput, completes the c14 live frontier with fallback, and continues to improve the physical mixed-fidelity runtime on the production ROCm path.
