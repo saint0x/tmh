@@ -29,13 +29,13 @@ SOCK has validated TMH on the production `Qwen/Qwen3-30B-A3B-GPTQ-Int4` path acr
 
 | Benchmark | Result |
 | --- | ---: |
-| KV token capacity at util0.35, 8k context | `123,312` TMH vs `70,944` standard (`+73.82%`) |
-| Max concurrency at util0.35, 8k context | `15.05` TMH vs `8.66` standard (`+73.79%`) |
-| Max concurrency at util0.35, 16k context | `7.53` TMH vs `4.33` standard (`+73.90%`) |
-| c14 live frontier with overlay fallback | completes `14/14` requests |
-| All-raw live saturation control at c12 | `1002.77` total tok/s (`-2.07%` vs standard) |
-| Adaptive-raw live saturation at c12, hot25 | `168.31` total tok/s while preserving `+73.51%` capacity |
-| Best current physical TMH runtime | `29.10` geomean completion tok/s, `39.72` geomean total tok/s |
+| KV token capacity at util0.35 | `+73.82%` vs standard |
+| Max concurrency at util0.35, 8k context | `+73.79%` vs standard |
+| Max concurrency at util0.35, 16k context | `+73.90%` vs standard |
+| c14 live frontier with overlay fallback | frontier completes cleanly |
+| All-raw live saturation control at c12 | `-2.07%` vs standard total tok/s |
+| Adaptive-raw live saturation at c12, hot25 | preserves `+73.51%` capacity while improving the hot25 live path |
+| Best current physical TMH runtime | `+2.12%` vs the prior physical TMH pass |
 
 This standalone repo preserves the contract and reproducible validation boundary behind those production runs:
 
@@ -46,7 +46,7 @@ This standalone repo preserves the contract and reproducible validation boundary
 | paper-claim stress rows | `732,000` |
 | adversarial checked layer-pages | `356,890,836` |
 
-Read [RESULTS.md](RESULTS.md) for the full evidence boundary.
+Read [RESULTS.md](RESULTS.md) for the full evidence boundary. For exact benchmark tables and raw production measurements, see [ariacomputecompany/sock](https://github.com/ariacomputecompany/sock).
 
 ## Repository Layout
 
