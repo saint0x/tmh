@@ -32,7 +32,6 @@ SOCK has validated TMH on the production `Qwen/Qwen3-30B-A3B-GPTQ-Int4` path acr
 | KV token capacity at util0.35 | `+73.82%` vs standard |
 | Max concurrency at util0.35, 8k context | `+73.79%` vs standard |
 | Max concurrency at util0.35, 16k context | `+73.90%` vs standard |
-| c14 live frontier with overlay fallback | frontier completes cleanly |
 | All-raw live saturation control at c12 | `-2.07%` vs standard total tok/s |
 | Adaptive-raw live saturation at c12, hot25 | preserves `+73.51%` capacity while improving the hot25 live path |
 | Best current physical TMH runtime | `+2.12%` vs the prior physical TMH pass |
