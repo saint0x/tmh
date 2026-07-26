@@ -55,7 +55,6 @@ src/                  Fzy POC for page roles, planning, runtime accounting, and 
 standalone_harness/   Python validators and Fozzy scenarios
 artifacts/            frozen reports, JSON outputs, and recorded Fozzy traces
 TMH.md                architecture and implementation map
-SPEC.md               standalone contract and invariants
 RESULTS.md            current production plus POC evidence
 OPTIMIZATIONS.md      concise SOCK optimization ledger
 TMHSTORY.md           short project history
