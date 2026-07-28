@@ -12,6 +12,9 @@ struct DemotionResult {
 struct AppendResult {
     manager: ManagedSession, used_blocks: i32, tail_block_tokens: i32,
 }
+struct PlannedBlockLayout {
+    k_precision_name: str, v_precision_name: str, role_name: str, is_hot: i32,
+}
 fn build_empty() -> ManagedSession {
     return ManagedSession {
         pool_blocks_wire: "", pool_free_ids_wire: "", pool_next_block_id: 0, pool_live_blocks: 0, pool_total_allocations: 0, pool_total_frees: 0, layer_tables_wire: "", used_blocks: 0, hot_blocks: 0, recent_start_block: 0, block_remaps: 0, copy_on_write_count: 0,
@@ -261,6 +264,28 @@ fn planned_is_hot(compiled: runtime.tmh_plan.TMHMemoryPlan, logical_block_id: i3
     }
     return logical_block_is_hot(manager, logical_block_id)
 }
+fn planned_role_name_from_range(planned: runtime.tmh_plan.PageRangePlan) -> str {
+    if planned.pin == 1 {
+        return "pinned"
+    }
+    if planned.residency_tier == "hot" {
+        return "recent"
+    }
+    if planned.semantic_class == "late_layer_payload" {
+        return "late_layer_protected"
+    }
+    return "old"
+}
+fn planned_layout(shape: model.EngineShape, compiled: runtime.tmh_plan.TMHMemoryPlan, policy_name: str, logical_block_id: i32, layer_id: i32, manager: ManagedSession) -> PlannedBlockLayout {
+    let planned = runtime.tmh_plan.range_for(compiled, layer_id, logical_block_id) if planned.authority != "" {
+        return PlannedBlockLayout {
+            k_precision_name: planned.k_precision_name, v_precision_name: planned.v_precision_name, role_name: planned_role_name_from_range(planned), is_hot: if planned.residency_tier == "hot" { 1 } else { 0 },
+        }
+    }
+    return PlannedBlockLayout {
+        k_precision_name: desired_k_precision_name(policy_name, logical_block_id, manager), v_precision_name: desired_v_precision_name(policy_name, shape.late_layer_start, layer_id, logical_block_id, manager), role_name: desired_role_name(shape, layer_id, logical_block_id, manager), is_hot: logical_block_is_hot(manager, logical_block_id),
+    }
+}
 fn normalize_raw_policy_layout(shape: model.EngineShape, hot_budget_pct: i32, policy_name: str, manager: ManagedSession) -> ManagedSession {
     if trace_enabled() == 1 {
         discard term.write("FPA_TRACE_APPEND normalize_begin\n")
@@ -369,20 +394,20 @@ fn demote_layer(shape: model.EngineShape, policy_name: str, layer_id: i32, manag
 }
 fn demote_layer_with_plan(shape: model.EngineShape, compiled: runtime.tmh_plan.TMHMemoryPlan, policy_name: str, layer_id: i32, manager: ManagedSession) -> DemotionResult {
     let mut pool = pool_of(manager) let mut table = table_at(manager, layer_id) let mut remapped = 0 let mut logical_block_id = 0 while logical_block_id < kv.logical_block_table.len(table) {
-        let desired_k = planned_k_precision_name(compiled, policy_name, logical_block_id, layer_id, manager) let desired_v = planned_v_precision_name(shape, compiled, policy_name, logical_block_id, layer_id, manager) let desired_role = planned_role_name(shape, compiled, logical_block_id, layer_id, manager) let desired_hot = planned_is_hot(compiled, logical_block_id, layer_id, manager) let reference = kv.logical_block_table.ref_at(table, logical_block_id) let current = kv.physical_block_pool.block_at(pool, reference.physical_block_id) let mut should_remap = 0 if current.k_precision_name != desired_k {
+        let desired = planned_layout(shape, compiled, policy_name, logical_block_id, layer_id, manager) let reference = kv.logical_block_table.ref_at(table, logical_block_id) let current = kv.physical_block_pool.block_at(pool, reference.physical_block_id) let mut should_remap = 0 if current.k_precision_name != desired.k_precision_name {
             should_remap = 1
         }
-        if current.v_precision_name != desired_v {
+        if current.v_precision_name != desired.v_precision_name {
             should_remap = 1
         }
-        if current.role_name != desired_role {
+        if current.role_name != desired.role_name {
             should_remap = 1
         }
-        if current.is_hot != desired_hot {
+        if current.is_hot != desired.is_hot {
             should_remap = 1
         }
         if should_remap == 1 {
-            let replacement = kv.physical_block_pool.allocate(pool, layer_id, current.start_token, current.token_count, desired_k, desired_v, desired_role, desired_hot, 0, if desired_hot == 1 { 0 } else { 1 }, current.generation + 1,) table = kv.logical_block_table.replace_mapping(table, logical_block_id, replacement.physical_block_id, reference.token_count) pool = kv.physical_block_pool.increment_refcount(replacement.pool, replacement.physical_block_id) pool = kv.physical_block_pool.decrement_refcount(pool, current.physical_block_id) remapped = remapped + 1
+            let replacement = kv.physical_block_pool.allocate(pool, layer_id, current.start_token, current.token_count, desired.k_precision_name, desired.v_precision_name, desired.role_name, desired.is_hot, 0, if desired.is_hot == 1 { 0 } else { 1 }, current.generation + 1,) table = kv.logical_block_table.replace_mapping(table, logical_block_id, replacement.physical_block_id, reference.token_count) pool = kv.physical_block_pool.increment_refcount(replacement.pool, replacement.physical_block_id) pool = kv.physical_block_pool.decrement_refcount(pool, current.physical_block_id) remapped = remapped + 1
         }
         logical_block_id = logical_block_id + 1
     }
